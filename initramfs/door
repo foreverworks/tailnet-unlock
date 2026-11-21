@@ -1,0 +1,120 @@
+#!/bin/sh
+# The door's forced command, one per SSH session (DESIGN.md section 7.3, step 4).
+#
+#   /usr/lib/tailnet-unlock/door <delivery|operator>   (the role is set by authorized_keys)
+#
+# It reads SSH_ORIGINAL_COMMAND, which dropbear sets for forced commands, matches it with one
+# `case`, and never evaluates, splits or passes it to a shell. Results are one JSON line:
+#   loaded 0, wrong-key 1, not-waiting 2, boot-mismatch 3, bad-command 4.
+set -u
+TU_HERE=${0%/*}
+# shellcheck source=paths.sh
+. "$TU_HERE/paths.sh"
+# shellcheck source=lib.sh
+. "$TU_HERE/lib.sh"
+# shellcheck source=/dev/null
+[ -r "$TU_CONF" ] && . "$TU_CONF"
+
+door_result() {
+	printf '{"result":"%s"}\n' "$1"
+	exit "$2"
+}
+
+door_refuse() {
+	door_result "$1" 4
+}
+
+door_status() {
+	printf '{"schema":"tailnet-unlock.door-status/1","key":%s,"boot_id":%s,"profile":%s,' \
+		"$(tu_jstr "$(tu_get role)")" "$(tu_jstr "$(tu_boot_id)")" \
+		"$(tu_jstr "${TU_PROFILE-}")"
+	printf '"seal":%s,"degraded":%s,"backend":%s,"waiting_for":%s,"keyformat":%s,' \
+		"$(tu_jstr "$(tu_get seal)")" \
+		"$(tu_jlist "${TU_DEGRADED-} $(tu_get degraded)")" \
+		"$(tu_jstr "${TU_BACKEND-}")" "$(tu_jstr "$(tu_get waiting_for)")" \
+		"$(tu_jstr "$(tu_get keyformat)")"
+	restarts_dropbear=$(tu_get restarts.dropbear)
+	restarts_tailscaled=$(tu_get restarts.tailscaled)
+	printf '"kernel":%s,"tailscaled":%s,"restarts":{"dropbear":%d,"tailscaled":%d}}\n' \
+		"$(tu_jstr "$(uname -r)")" "$(tu_jstr "${TU_TAILSCALED_VERSION-}")" \
+		"${restarts_dropbear:-0}" "${restarts_tailscaled:-0}"
+	exit 0
+}
+
+# Prints the encryption root once the load-key extension has named it; fails after the wait.
+door_wait_root() {
+	waited=0
+	while :; do
+		root=$(tu_get waiting_for)
+		if [ -n "$root" ]; then
+			printf '%s' "$root"
+			return 0
+		fi
+		[ "$waited" -ge "$TU_ROOT_WAIT_SECONDS" ] && return 1
+		sleep "$TU_TICK"
+		waited=$((waited + TU_TICK))
+	done
+}
+
+door_keystatus() {
+	"$TU_ZFS" get -H -o value keystatus "$1" 2>/dev/null
+}
+
+# Load the key read from stdin into the encryption root; at most 512 bytes reach zfs.
+door_load() {
+	root=$1
+	[ "$(door_keystatus "$root")" = available ] && door_result not-waiting 2
+	if head -c 512 | "$TU_ZFS" load-key -L prompt "$root" >/dev/null 2>&1; then
+		tu_put unlocked_by "$(tu_get role)"
+		door_result loaded 0
+	fi
+	[ "$(door_keystatus "$root")" = available ] && door_result not-waiting 2
+	door_result wrong-key 1
+}
+
+door_unlock() {
+	[ "$1" = "$(tu_boot_id)" ] || door_result boot-mismatch 3
+	root=$(door_wait_root) || door_result not-waiting 2
+	door_load "$root"
+}
+
+# The empty command, for operator keys: a person at a terminal types the key with echo off.
+door_prompt() {
+	[ -t 0 ] || door_refuse bad-command
+	printf 'tailnet-unlock door, boot %s, %s key\n' "$(tu_boot_id)" "$(tu_get role)"
+	root=$(door_wait_root) || door_result not-waiting 2
+	if [ "$(tu_get keyformat)" = raw ]; then
+		printf 'The root key of %s is raw bytes and cannot be typed: deliver it with unlock.\n' \
+			"$root"
+		door_refuse bad-command
+	fi
+	trap 'stty echo 2>/dev/null; exit 4' HUP INT TERM
+	stty -echo 2>/dev/null
+	printf 'Key for %s: ' "$root"
+	key=''
+	IFS= read -r key || :
+	stty echo 2>/dev/null
+	printf '\n'
+	printf '%s' "$key" | door_load "$root"
+	exit $?
+}
+
+role=${1-}
+case "$role" in
+delivery | operator) ;;
+*) door_refuse bad-command ;;
+esac
+
+h='[0123456789abcdef]'
+# shellcheck disable=SC2254 # $h is unquoted on purpose: each one is a bracket expression
+case "${SSH_ORIGINAL_COMMAND-}" in
+status)
+	door_status ;;
+"unlock "$h$h$h$h$h$h$h$h-$h$h$h$h-$h$h$h$h-$h$h$h$h-$h$h$h$h$h$h$h$h$h$h$h$h)
+	door_unlock "${SSH_ORIGINAL_COMMAND#unlock }" ;;
+'')
+	[ "$role" = operator ] || door_refuse bad-command
+	door_prompt ;;
+*)
+	door_refuse bad-command ;;
+esac

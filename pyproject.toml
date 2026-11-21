@@ -1,0 +1,53 @@
+[project]
+name = "tailnet-unlock"
+version = "0.0.0"
+description = "Unlock an encrypted Debian root from anywhere on a tailnet, with the door's identity sealed to the TPM"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+tailnet-unlock = "tailnet_unlock.cli:main"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+disallow_any_explicit = true
+warn_unused_ignores = true
+mypy_path = "src:tests:tests/vm"
+files = ["src", "tests", "tools"]
+explicit_package_bases = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ANN", "S", "C4", "PIE", "RET", "PL"]
+ignore = [
+  "S603",     # subprocess without shell: every call here passes an argument list, by design
+  "S607",     # tools are found on PATH, as the initramfs and Debian packaging expect
+  "PLR2004",  # protocol constants read better inline (exit codes, sizes)
+  "PLR0911",  # validators return early, once per rule
+  "PLR0912",
+  "PLR0913",
+  "PLR0915",
+  "PLR0917",  # the edge functions take their paths and flags positionally
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tailnet_unlock", "keys", "shellenv", "swtpm", "imagekit", "harness"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S108", "PLC0415", "RUF001"]  # tests hold hostile and look-alike input on purpose
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests", "tests/vm"]
+addopts = "-ra --strict-markers"
+markers = [
+  "container: needs the Debian 13 test image (swtpm, dropbear, initramfs-tools, root)",
+  "vm: needs QEMU, OVMF and swtpm on a host with KVM",
+]

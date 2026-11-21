@@ -1,0 +1,12 @@
+#!/bin/sh
+# /etc/initramfs/post-update.d/tailnet-unlock: one summary line per image, from the record the
+# hook wrote while building it. Never fails.
+version=${1-}
+image=${2-}
+record=/var/lib/tailnet-unlock/images/$version
+if [ -r "$record" ]; then
+	printf 'tailnet-unlock: %s: %s\n' "${image:-$version}" "$(cat "$record")" >&2
+else
+	printf 'tailnet-unlock: %s: no record (not configured)\n' "${image:-$version}" >&2
+fi
+exit 0

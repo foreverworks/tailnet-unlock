@@ -1,0 +1,214 @@
+#!/bin/sh
+# The supervisor: starts the door's daemons, keeps them running, and is the one place that stops
+# them and wipes (DESIGN.md section 7.3, step 2; decision D32). init-premount starts it in the
+# background; init-bottom and the panic script send it TERM.
+set -u
+TU_HERE=${0%/*}
+# shellcheck source=paths.sh
+. "$TU_HERE/paths.sh"
+# shellcheck source=lib.sh
+. "$TU_HERE/lib.sh"
+# shellcheck source=/dev/null
+. "$TU_CONF"
+
+dropbear_pid=''
+tailscaled_pid=''
+
+supervise_stop() {
+	trap '' TERM INT HUP
+	tu_wipe
+	rm -f "$TU_RUN/supervise.pid"
+	exit 0
+}
+trap supervise_stop TERM
+trap '' HUP INT
+
+# Sleep that a TERM interrupts at once.
+nap() {
+	sleep "$1" &
+	wait $! 2>/dev/null || :
+}
+
+uptime_seconds() {
+	up=''
+	read -r up _ 2>/dev/null </proc/uptime || up=0
+	printf '%s' "${up%%.*}"
+}
+
+wait_for_tpm() {
+	modprobe -q tpm_tis 2>/dev/null || :
+	modprobe -q tpm_crb 2>/dev/null || :
+	waited=0
+	while [ ! -e "$TU_TPM_DEVICE" ] && [ "$waited" -lt 10 ]; do
+		nap 1
+		waited=$((waited + 1))
+	done
+	[ -e "$TU_TPM_DEVICE" ]
+}
+
+uplink_address=''
+uplink_device=''
+bring_up_uplink() {
+	# configure_networking and its helpers come from initramfs-tools
+	# shellcheck disable=SC1090 # initramfs-tools' scripts/functions, at boot only
+	. "$TU_INITRAMFS_FUNCTIONS"
+	IP=$TU_IP
+	BOOTIF=$TU_BOOTIF
+	DEVICE=''
+	export IP BOOTIF DEVICE
+	configure_networking >/dev/null 2>&1 || :
+	for conf in "$TU_NET_CONF_DIR/net-${DEVICE-}.conf" "$TU_NET_CONF_DIR"/net-*.conf; do
+		[ -r "$conf" ] || continue
+		IPV4ADDR=''
+		# shellcheck disable=SC1090 # ipconfig's own output, written at boot
+		. "$conf"
+		uplink_address=${IPV4ADDR-}
+		uplink_device=${DEVICE-}
+		break
+	done
+	tu_put uplink_device "$uplink_device"
+	if [ -n "$TU_DNS" ] && [ -n "$uplink_address" ]; then
+		: >/etc/resolv.conf
+		for server in $TU_DNS; do
+			printf 'nameserver %s\n' "$server" >>/etc/resolv.conf
+		done
+	fi
+}
+
+# Unseal (or fall back to the recovery key) and leave the key path in door_key_path.
+door_key_path=''
+choose_key() {
+	door_key_path=''
+	if [ "$(tu_get seal)" != ok ] && [ "$(tu_get role)" = recovery ]; then
+		door_key_path=$TU_ETC/recovery_host_key
+		return 0
+	fi
+	if [ ! -d "$TU_ETC/door.tpm" ]; then
+		seal=no-container
+	elif [ ! -e "$TU_TPM_DEVICE" ]; then
+		seal=no-tpm
+	elif "$TU_LIB/unseal" "$TU_ETC/door.tpm" "$TU_RUN/door_key" 2>/dev/null; then
+		tu_put seal ok
+		tu_put role sealed
+		door_key_path=$TU_RUN/door_key
+		return 0
+	else
+		seal=unseal-failed
+	fi
+	tu_put seal "$seal"
+	if [ "$TU_RECOVERY" != off ] && [ -r "$TU_ETC/recovery_host_key" ]; then
+		tu_put role recovery
+		door_key_path=$TU_ETC/recovery_host_key
+		return 0
+	fi
+	tu_put role none
+	return 1
+}
+
+start_dropbear() {
+	choose_key || return 1
+	listen=''
+	role=$(tu_get role)
+	if [ "$role" = sealed ] || [ "$TU_RECOVERY" = uplink+tailnet ]; then
+		listen="-p 127.0.0.1:$TU_PORT"
+	fi
+	[ -n "$uplink_address" ] && listen="$listen -p $uplink_address:$TU_PORT"
+	[ -n "$listen" ] || return 1
+	rm -f "$TU_RUN/dropbear.pid"
+	# shellcheck disable=SC2086 # $listen holds separate -p arguments on purpose
+	dropbear -F -E -r "$door_key_path" $listen -s -j -k -I "$TU_IDLE_TIMEOUT" \
+		-P "$TU_RUN/dropbear.pid" </dev/null >>"$TU_RUN/dropbear.log" 2>&1 &
+	dropbear_pid=$!
+	tu_put dropbear.child "$dropbear_pid"
+	# dropbear keeps its host key in memory: once it has written its PID file the plaintext
+	# door key can go (DESIGN.md 7.3 step 2.4)
+	waited=0
+	while [ ! -s "$TU_RUN/dropbear.pid" ] && [ "$waited" -lt 50 ] && tu_alive "$dropbear_pid"; do
+		sleep 0.1 2>/dev/null || sleep 1
+		waited=$((waited + 1))
+	done
+	[ "$door_key_path" = "$TU_RUN/door_key" ] && tu_shred "$TU_RUN/door_key"
+	tu_alive "$dropbear_pid"
+}
+
+tailnet_wanted() {
+	[ "$TU_TAILNET" = yes ] && [ -x /usr/sbin/tailscaled ] && [ -r "$TU_ETC/unlock.state" ]
+}
+
+start_tailscaled() {
+	tailnet_wanted || return 1
+	[ -e "$TU_RUN/unlock.state" ] || cp "$TU_ETC/unlock.state" "$TU_RUN/unlock.state" || return 1
+	/usr/sbin/tailscaled --state="$TU_RUN/unlock.state" --encrypt-state \
+		--tun=userspace-networking --socket="$TU_RUN/tailscaled.sock" --no-logs-no-support \
+		</dev/null >>"$TU_RUN/tailscaled.log" 2>&1 &
+	tailscaled_pid=$!
+	tu_put tailscaled.child "$tailscaled_pid"
+}
+
+summary() {
+	role=$(tu_get role)
+	case "$role" in
+	sealed) fp=${TU_SEALED_FP-} ;;
+	recovery) fp=${TU_RECOVERY_FP-} ;;
+	*) fp='' ;;
+	esac
+	tu_log "profile ${TU_PROFILE} seal $(tu_get seal) door ${role} ${fp:+key $fp }uplink" \
+		"${uplink_address:-none}:${TU_PORT} unlock node" \
+		"$([ "$TU_TAILNET" = yes ] && printf '%s' "$TU_UNLOCK_HOSTNAME" || printf off)" \
+		"boot $(tu_boot_id)"
+}
+
+# A daemon that exited is started again after a backoff that doubles from 1 to 30 seconds and
+# resets after a minute of uptime.
+supervise_loop() {
+	dropbear_backoff=1
+	tailscaled_backoff=1
+	dropbear_since=$(uptime_seconds)
+	tailscaled_since=$dropbear_since
+	while :; do
+		nap 2
+		if [ -n "$dropbear_pid" ] && ! tu_alive "$dropbear_pid"; then
+			wait "$dropbear_pid" 2>/dev/null || :
+			now=$(uptime_seconds)
+			[ $((now - dropbear_since)) -ge 60 ] && dropbear_backoff=1
+			tu_count restarts.dropbear
+			tu_log "the door (dropbear) exited; starting it again in ${dropbear_backoff}s"
+			nap "$dropbear_backoff"
+			start_dropbear || tu_log "the door could not start again; retrying"
+			dropbear_since=$(uptime_seconds)
+			dropbear_backoff=$((dropbear_backoff * 2))
+			[ "$dropbear_backoff" -gt 30 ] && dropbear_backoff=30
+		fi
+		if [ -n "$tailscaled_pid" ] && ! tu_alive "$tailscaled_pid"; then
+			wait "$tailscaled_pid" 2>/dev/null || :
+			now=$(uptime_seconds)
+			[ $((now - tailscaled_since)) -ge 60 ] && tailscaled_backoff=1
+			tu_count restarts.tailscaled
+			tu_log "the unlock node (tailscaled) exited; starting it again in" \
+				"${tailscaled_backoff}s"
+			nap "$tailscaled_backoff"
+			start_tailscaled || tu_log "the unlock node could not start again; retrying"
+			tailscaled_since=$(uptime_seconds)
+			tailscaled_backoff=$((tailscaled_backoff * 2))
+			[ "$tailscaled_backoff" -gt 30 ] && tailscaled_backoff=30
+		fi
+	done
+}
+
+tu_put supervise.pid "$$"
+tu_put restarts.dropbear 0
+tu_put restarts.tailscaled 0
+if tu_noshell; then
+	# a kernel panic reboots instead of hanging (DESIGN.md 7.3, exit paths)
+	printf '10\n' >"$TU_KERNEL_PANIC" 2>/dev/null || :
+fi
+wait_for_tpm || tu_log "no TPM at $TU_TPM_DEVICE after 10 seconds"
+bring_up_uplink
+tu_log "uplink ${uplink_device:-none} ${uplink_address:-without an address}"
+if ! start_dropbear; then
+	tu_log "no door this boot: seal $(tu_get seal), recovery ${TU_RECOVERY}; the console prompt" \
+		"remains"
+fi
+start_tailscaled || :
+summary
+supervise_loop

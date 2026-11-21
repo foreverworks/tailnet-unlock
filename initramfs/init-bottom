@@ -1,0 +1,43 @@
+#!/bin/sh
+# initramfs-tools init-bottom script (DESIGN.md section 7.3, step 5): the root is mounted. Stop the
+# supervisor (it wipes), leave one non-secret record, unmount the tmpfs, flush the uplink address.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1-}" in
+prereqs) prereqs; exit 0 ;;
+esac
+
+[ -r /conf/tailnet-unlock.conf ] || exit 0
+# shellcheck source=paths.sh
+. /usr/lib/tailnet-unlock/paths.sh
+# shellcheck source=lib.sh
+. "$TU_LIB/lib.sh"
+# shellcheck source=/dev/null
+. "$TU_CONF"
+[ -d "$TU_RUN" ] || exit 0
+
+unlocked_by=$(tu_get unlocked_by)
+role=$(tu_get role)
+seal=$(tu_get seal)
+device=$(tu_get uplink_device)
+degraded="${TU_DEGRADED-} $(tu_get degraded)"
+
+tu_stop_supervisor 15
+stty echo 2>/dev/null <"$TU_CONSOLE" || :
+
+mkdir -p "$TU_RECORD_DIR"
+printf '{"schema":"tailnet-unlock.boot/1","unlocked_by":%s,"door":%s,"profile":%s,"seal":%s,"degraded":%s}\n' \
+	"$(tu_jstr "${unlocked_by:-unknown}")" "$(tu_jstr "$role")" \
+	"$(tu_jstr "${TU_PROFILE-}")" "$(tu_jstr "$seal")" "$(tu_jlist "$degraded")" \
+	>"$TU_RECORD_DIR/boot.json"
+
+rm -rf "${TU_RUN:?}"/* 2>/dev/null || :
+umount "$TU_RUN" 2>/dev/null || :
+rmdir "$TU_RUN" "${TU_RUN%/*}" 2>/dev/null || :
+
+if [ "${TU_FLUSH-yes}" = yes ] && [ -n "$device" ]; then
+	ip -4 addr flush dev "$device" 2>/dev/null || :
+	ip link set dev "$device" down 2>/dev/null || :
+	rm -f "$TU_NET_CONF_DIR/net-$device.conf"
+fi
+exit 0

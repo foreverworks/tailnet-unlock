@@ -1,0 +1,45 @@
+#!/bin/sh
+# initramfs-tools init-premount script (DESIGN.md section 7.3, step 2). Never blocks the boot:
+# it mounts devpts if missing and the private tmpfs, then starts the supervisor in the background.
+PREREQ="udev"
+prereqs() { echo "$PREREQ"; }
+case "${1-}" in
+prereqs) prereqs; exit 0 ;;
+esac
+
+[ -r /conf/tailnet-unlock.conf ] || exit 0
+# shellcheck source=paths.sh
+. /usr/lib/tailnet-unlock/paths.sh
+# shellcheck source=lib.sh
+. "$TU_LIB/lib.sh"
+# shellcheck source=/dev/null
+. "$TU_CONF"
+
+if [ "${TU_DOOR-none}" = none ]; then
+	tu_log "no door in this image (degraded: ${TU_DEGRADED:-none}); the console prompt remains"
+	exit 0
+fi
+
+cleanup() {
+	tu_wipe
+	umount "$TU_RUN" 2>/dev/null || :
+	tu_log "the door did not start ($1); the console prompt remains"
+	exit 0
+}
+
+if [ ! -c /dev/pts/ptmx ]; then
+	mkdir -p /dev/pts
+	mount -t devpts -o noexec,nosuid,gid=5,mode=0600 devpts /dev/pts || cleanup "no devpts"
+fi
+mkdir -p "$TU_RUN" || cleanup "no run directory"
+chmod 0700 "${TU_RUN%/*}" 2>/dev/null || :
+mount -t tmpfs -o mode=0700,size=16m,nosuid,nodev tmpfs "$TU_RUN" || cleanup "no tmpfs"
+
+# setsid detaches the supervisor from init's process group; it is reparented to init and runs
+# until init-bottom or the panic script stops it.
+if command -v setsid >/dev/null 2>&1; then
+	setsid "$TU_LIB/supervise" </dev/null >/dev/null 2>&1 &
+else
+	"$TU_LIB/supervise" </dev/null >/dev/null 2>&1 &
+fi
+exit 0

@@ -1,0 +1,36 @@
+#!/bin/sh
+# initramfs-tools panic script (DESIGN.md section 7.3, exit paths). initramfs-tools runs it from
+# panic() only when panic= is not set (0.148.4 scripts/functions, lines 48 to 73), which is why
+# neither profile sets panic=.
+#   tpm:      stop the supervisor, wipe, return; panic() opens its shell for the console.
+#   measured: wipe, then reboot and never return, so panic() never reaches its shell.
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+case "${1-}" in
+prereqs) prereqs; exit 0 ;;
+esac
+
+# shellcheck source=paths.sh
+. /usr/lib/tailnet-unlock/paths.sh
+# shellcheck source=lib.sh
+. "$TU_LIB/lib.sh"
+# shellcheck source=/dev/null
+[ -r "$TU_CONF" ] && . "$TU_CONF"
+
+if tu_noshell; then
+	trap '' INT QUIT TSTP HUP TERM
+	[ -d "$TU_RUN" ] && tu_stop_supervisor 5
+	tu_log "the boot failed; the door is stopped and wiped. No shell under the measured" \
+		"profile: rebooting in 10 seconds"
+	sleep "$TU_PANIC_DELAY"
+	"$TU_REBOOT" -f
+	echo b >"$TU_SYSRQ" 2>/dev/null
+	while :; do
+		sleep 3600
+	done
+fi
+
+[ -d "$TU_RUN" ] || exit 0
+tu_stop_supervisor 15
+tu_log "the door is stopped and wiped before the shell opens; the console prompt remains"
+exit 0

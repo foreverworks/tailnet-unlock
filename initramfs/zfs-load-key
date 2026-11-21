@@ -1,0 +1,95 @@
+# shellcheck shell=sh
+# OpenZFS load-key extension: /etc/zfs/initramfs-tools-load-key.d/tailnet-unlock
+# (DESIGN.md section 7.3, step 3). decrypt_fs in OpenZFS's scripts/zfs sources it in a subshell
+# with ENCRYPTIONROOT and KEYLOCATION set. Returning 0 with the key loaded ends decrypt_fs; any
+# other return lets OpenZFS load the key its own way.
+
+tu_console_prompt() {
+	tu_root=$1
+	# shellcheck disable=SC2094 # the console is a terminal, read and written by design
+	exec <"$TU_CONSOLE" >"$TU_CONSOLE" 2>&1
+	while :; do
+		stty -echo 2>/dev/null
+		printf 'Key for %s (or deliver it through the door): ' "$tu_root"
+		tu_key=''
+		if ! IFS= read -r tu_key; then
+			stty echo 2>/dev/null
+			sleep 5
+			continue
+		fi
+		stty echo 2>/dev/null
+		printf '\n'
+		if printf '%s' "$tu_key" | "$TU_ZFS" load-key -L prompt "$tu_root" >/dev/null 2>&1; then
+			tu_key=''
+			tu_put unlocked_by console
+			return 0
+		fi
+		tu_key=''
+		[ "$("$TU_ZFS" get -H -o value keystatus "$tu_root" 2>/dev/null)" = available ] &&
+			return 0
+		printf 'That key did not load the encryption root; try again.\n'
+	done
+}
+
+tu_load_key() {
+	[ -r /conf/tailnet-unlock.conf ] || return 1
+	# shellcheck source=paths.sh
+	. /usr/lib/tailnet-unlock/paths.sh
+	# shellcheck source=lib.sh
+	. "$TU_LIB/lib.sh"
+	# shellcheck source=/dev/null
+	. "$TU_CONF"
+	[ -d "$TU_RUN" ] || return 1
+	tu_root=${ENCRYPTIONROOT-}
+	[ -n "$tu_root" ] || return 1
+
+	case "${KEYLOCATION-}" in
+	file://*)
+		if [ -r "${KEYLOCATION#file://}" ] && [ -z "${TU_REHEARSAL_MINUTES-}" ]; then
+			tu_put unlocked_by local
+			return 1
+		fi
+		;;
+	esac
+
+	tu_put keyformat "$("$TU_ZFS" get -H -o value keyformat "$tu_root" 2>/dev/null)"
+	tu_put waiting_for "$tu_root"
+
+	tu_prompt=''
+	if [ "$(tu_get keyformat)" = raw ]; then
+		tu_log "the root key is raw bytes and cannot be typed; waiting for the door"
+	else
+		tu_console_prompt "$tu_root" &
+		tu_prompt=$!
+	fi
+
+	tu_limit=''
+	if [ -n "${TU_REHEARSAL_MINUTES-}" ]; then
+		case "${KEYLOCATION-}" in
+		file://*) tu_limit=$((TU_REHEARSAL_MINUTES * TU_MINUTE)) ;;
+		esac
+	fi
+	tu_waited=0
+	while [ "$("$TU_ZFS" get -H -o value keystatus "$tu_root" 2>/dev/null)" != available ]; do
+		if [ -n "$tu_limit" ] && [ "$tu_waited" -ge "$tu_limit" ]; then
+			[ -n "$tu_prompt" ] && kill "$tu_prompt" 2>/dev/null
+			stty echo 2>/dev/null <"$TU_CONSOLE"
+			rm -f "$TU_RUN/waiting_for"
+			tu_put unlocked_by local
+			tu_log "rehearsal: no key arrived in ${TU_REHEARSAL_MINUTES} minutes; the local key" \
+				"loads"
+			return 1
+		fi
+		sleep "$TU_TICK"
+		tu_waited=$((tu_waited + TU_TICK))
+	done
+	if [ -n "$tu_prompt" ]; then
+		kill "$tu_prompt" 2>/dev/null
+		wait "$tu_prompt" 2>/dev/null
+	fi
+	stty echo 2>/dev/null <"$TU_CONSOLE"
+	rm -f "$TU_RUN/waiting_for"
+	return 0
+}
+
+tu_load_key

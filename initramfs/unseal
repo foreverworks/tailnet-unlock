@@ -1,0 +1,53 @@
+#!/bin/sh
+# Unseal the door key from a door.tpm container into a file (DESIGN.md section 8.4).
+#
+#   unseal <container directory> <output file>
+#
+# Always in a session salted with the transient primary key and with response encryption on, so
+# the door key does not cross the bus to a discrete TPM in clear. Exit status: 0 unsealed,
+# 2 not a container this image can open, 3 the TPM refused. The TCTI comes from paths.sh.
+set -u
+TU_HERE=${0%/*}
+# shellcheck source=paths.sh
+. "$TU_HERE/paths.sh"
+container=$1
+output=$2
+umask 077
+TPM2TOOLS_TCTI=$TU_TCTI
+export TPM2TOOLS_TCTI
+
+format=''
+profile=''
+read -r format 2>/dev/null <"$container/format" || exit 2
+read -r profile 2>/dev/null <"$container/profile" || exit 2
+[ "$format" = "tailnet-unlock door 1" ] || exit 2
+# measured containers are milestone M6; this image opens the tpm profile only
+[ "$profile" = tpm ] || exit 2
+[ -r "$container/public" ] && [ -r "$container/private" ] || exit 2
+
+work=$(mktemp -d "${output%/*}/unseal.XXXXXX") || exit 3
+# tpm2_flushcontext 5.7 takes a session file, but objects only by handle or -t; through
+# /dev/tpmrm0 -t reaches this connection's own objects alone
+fail() {
+	tpm2_flushcontext -Q "$work/session.ctx" 2>/dev/null
+	tpm2_flushcontext -Q -t 2>/dev/null
+	rm -rf "$work"
+	exit 3
+}
+tpm2_createprimary -Q -C o -g sha256 -G ecc256:aes128cfb \
+	-a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|noda|restricted|decrypt' \
+	-c "$work/primary.ctx" || fail
+# each tool loads the saved contexts again; flushing after each step keeps a TPM without a
+# resource manager (swtpm in the tests) from running out of object slots
+tpm2_flushcontext -Q -t
+tpm2_load -Q -C "$work/primary.ctx" -u "$container/public" -r "$container/private" \
+	-c "$work/door.ctx" || fail
+tpm2_flushcontext -Q -t
+tpm2_startauthsession -Q --hmac-session -c "$work/primary.ctx" -S "$work/session.ctx" || fail
+tpm2_flushcontext -Q -t
+tpm2_sessionconfig -Q "$work/session.ctx" --enable-encrypt || fail
+tpm2_unseal -Q -c "$work/door.ctx" -p "session:$work/session.ctx" -o "$output" || fail
+tpm2_flushcontext -Q "$work/session.ctx"
+tpm2_flushcontext -Q -t
+rm -rf "$work"
+exit 0

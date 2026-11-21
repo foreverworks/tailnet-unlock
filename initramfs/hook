@@ -1,0 +1,256 @@
+#!/bin/sh
+# initramfs-tools hook: /usr/share/initramfs-tools/hooks/tailnet-unlock (DESIGN.md section 7.2).
+#
+# Puts the door into every image. It never fails the build (decision D18): each part that is
+# missing or does not fit degrades the image on its own, loudly, and the degradation is recorded in
+# the image (the door's status reports it) and in /var/lib/tailnet-unlock/images/<version>.
+PREREQ="zfs"
+prereqs() { echo "$PREREQ"; }
+case "${1-}" in
+prereqs) prereqs; exit 0 ;;
+esac
+
+# shellcheck source=/dev/null # initramfs-tools' own, present on the box
+. /usr/share/initramfs-tools/hook-functions
+
+CONFIG_DIR=/etc/tailnet-unlock
+STATE_DIR=/var/lib/tailnet-unlock
+SRC=/usr/lib/tailnet-unlock
+BOOT_DIR=/boot
+TAILSCALE_FLOOR_MAJOR=1
+TAILSCALE_FLOOR_MINOR=86
+TPM2_TOOLS="tpm2_createprimary tpm2_load tpm2_startauthsession tpm2_sessionconfig tpm2_unseal
+tpm2_flushcontext"
+
+degraded=''
+degrade() {
+	degraded="${degraded:+$degraded }$1"
+	shift
+	echo "W: tailnet-unlock: $*" >&2
+}
+
+note() {
+	[ "${verbose-n}" = y ] && echo "I: tailnet-unlock: $*" >&2
+	return 0
+}
+
+# A value safe inside single quotes in the rendered configuration.
+token() {
+	printf '%s' "$1" | tr -c 'A-Za-z0-9 _.:/@+=-' '_'
+}
+
+tailscaled_version() {
+	/usr/sbin/tailscaled --version 2>/dev/null | head -n 1 | tr -cd '0-9.'
+}
+
+version_at_least_floor() {
+	major=${1%%.*}
+	rest=${1#*.}
+	minor=${rest%%.*}
+	case "$major$minor" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "$major" -gt "$TAILSCALE_FLOOR_MAJOR" ] && return 0
+	[ "$major" -eq "$TAILSCALE_FLOOR_MAJOR" ] && [ "$minor" -ge "$TAILSCALE_FLOOR_MINOR" ]
+}
+
+# The image's needs on /boot, in KiB (DESIGN.md 7.2, step 6): the current image for this kernel,
+# which update-initramfs keeps until the new one is complete, plus half of tailscaled's size (the
+# zstd estimate) unless the current image already carries it, plus 16 MiB.
+boot_space_fits() {
+	current_kb=0
+	if [ -f "$BOOT_DIR/initrd.img-${version-}" ]; then
+		current_kb=$(( $(wc -c <"$BOOT_DIR/initrd.img-$version") / 1024 ))
+	fi
+	tailscaled_kb=$(( $(wc -c </usr/sbin/tailscaled) / 2048 ))
+	if [ -r "$STATE_DIR/images/${version-}" ] &&
+		grep -q 'tailnet=yes' "$STATE_DIR/images/$version" 2>/dev/null; then
+		tailscaled_kb=0
+	fi
+	need_kb=$((current_kb + tailscaled_kb + 16384))
+	free_kb=$(df -Pk "$BOOT_DIR" 2>/dev/null | awk 'NR == 2 { print $4 }')
+	case "$free_kb" in
+	'' | *[!0-9]*) return 0 ;;
+	esac
+	[ "$free_kb" -ge "$need_kb" ]
+}
+
+copy_door_scripts() {
+	mkdir -p "$DESTDIR/usr/lib/tailnet-unlock"
+	for file in door supervise unseal lib.sh paths.sh; do
+		cp -p "$SRC/$file" "$DESTDIR/usr/lib/tailnet-unlock/$file" || return 1
+	done
+}
+
+copy_dropbear() {
+	copy_exec /usr/sbin/dropbear /usr/sbin || return 1
+	# dropbear looks up its one user through NSS, as Debian's dropbear-initramfs hook does
+	libc_dir=$(ldd /usr/sbin/dropbear |
+		sed -nr 's#.* => (/.*)/libc\.so\.[0-9.-]+ \(0x[[:xdigit:]]+\)$#\1#p')
+	for so in "$libc_dir"/libnss_files.so.*; do
+		[ -f "$so" ] && copy_exec "$so"
+	done
+	mkdir -p "$DESTDIR/etc" "$DESTDIR/root/.ssh"
+	printf 'root:x:0:0:root:/root:/bin/sh\n' >"$DESTDIR/etc/passwd"
+	printf 'passwd: files\n' >"$DESTDIR/etc/nsswitch.conf"
+	chmod 0700 "$DESTDIR/root" "$DESTDIR/root/.ssh"
+}
+
+copy_tpm2() {
+	for tool in $TPM2_TOOLS; do
+		copy_exec "/usr/bin/$tool" /usr/bin || return 1
+	done
+	# the device transport is loaded at run time by tctildr, so copy_exec cannot see it
+	found=''
+	for so in /usr/lib/*/libtss2-tcti-device.so.0 /lib/*/libtss2-tcti-device.so.0; do
+		[ -e "$so" ] || continue
+		copy_exec "$so"
+		found=yes
+	done
+	[ -n "$found" ] || return 1
+	manual_add_modules tpm_tis
+	manual_add_modules tpm_crb
+}
+
+copy_uplink_driver() {
+	module_link=/sys/class/net/${TU_INTERFACE-}/device/driver/module
+	if [ -n "${TU_INTERFACE-}" ] && [ -e "$module_link" ]; then
+		manual_add_modules "$(basename "$(readlink -f "$module_link")")"
+	else
+		note "no driver module found for ${TU_INTERFACE-?}; relying on the image's own modules"
+	fi
+}
+
+copy_container() {
+	container=$STATE_DIR/door/door.tpm
+	for file in format profile public private pin; do
+		[ -r "$container/$file" ] || return 1
+	done
+	read -r format <"$container/format" || return 1
+	[ "$format" = "tailnet-unlock door 1" ] || return 1
+	mkdir -p "$DESTDIR/etc/tailnet-unlock/door.tpm"
+	for file in format profile public private pin; do
+		cp "$container/$file" "$DESTDIR/etc/tailnet-unlock/door.tpm/$file" || return 1
+	done
+}
+
+tu_hook() {
+	if [ ! -r "$CONFIG_DIR/box.toml" ]; then
+		note "not configured ($CONFIG_DIR/box.toml is missing): no door"
+		return 0
+	fi
+	work=$(mktemp -d "${TMPDIR:-/tmp}/tailnet-unlock-hook.XXXXXX") || return 0
+	door=none
+	tailnet=no
+	recovery=no
+	sealed_fp=''
+	recovery_fp=''
+	tailscaled_version=''
+
+	if ! tailnet-unlock render-initramfs --config-dir "$CONFIG_DIR" --out "$work" \
+		2>"$work/render.err"; then
+		degrade config-invalid "the configuration is invalid, so this image has no door:" \
+			"$(tail -n 1 "$work/render.err")"
+		printf 'TU_PROFILE=%s\n' "$(sed -n 's/^profile *= *"\([a-z]*\)".*/\1/p' \
+			"$CONFIG_DIR/box.toml" | head -n 1)" >"$work/tailnet-unlock.conf"
+	elif [ ! -x /usr/sbin/dropbear ]; then
+		degrade dropbear-missing "dropbear is not installed (dropbear-bin), so this image has" \
+			"no door"
+	else
+		# shellcheck disable=SC1091 # rendered at build time, in a temporary directory
+		. "$work/tailnet-unlock.conf"
+		if [ "${TU_PROFILE-}" = measured ]; then
+			degrade measured-unsupported "the measured profile is not built yet (M6); the" \
+				"sealed door is left out"
+		elif copy_container; then
+			door=sealed
+			sealed_fp=$(tailnet-unlock fingerprint "$STATE_DIR/door/door.tpm/pin" 2>/dev/null)
+		fi
+		if [ "${TU_RECOVERY-off}" != off ]; then
+			if [ -r "$STATE_DIR/door/recovery_host_key" ]; then
+				mkdir -p "$DESTDIR/etc/tailnet-unlock"
+				cp "$STATE_DIR/door/recovery_host_key" \
+					"$DESTDIR/etc/tailnet-unlock/recovery_host_key" && recovery=yes
+				chmod 0600 "$DESTDIR/etc/tailnet-unlock/recovery_host_key"
+				recovery_fp=$(tailnet-unlock fingerprint \
+					"$STATE_DIR/door/recovery_host_key.pub" 2>/dev/null)
+			else
+				degrade recovery-key-missing "recovery is enabled but there is no recovery key"
+			fi
+		fi
+		if [ "$door" = none ]; then
+			if [ "$recovery" = yes ]; then
+				door=recovery
+				degrade door-key-missing "no readable sealed door container: this image" \
+					"carries the recovery door only"
+			else
+				degrade door-key-missing "no readable sealed door container and no recovery" \
+					"key: this image has no door"
+			fi
+		fi
+	fi
+
+	if [ "$door" != none ]; then
+		if ! copy_door_scripts || ! copy_dropbear || ! copy_tpm2; then
+			degrade door-copy-failed "copying the door into the image failed: no door"
+			door=none
+		else
+			cp "$work/authorized_keys" "$DESTDIR/root/.ssh/authorized_keys"
+			chmod 0600 "$DESTDIR/root/.ssh/authorized_keys"
+			copy_uplink_driver
+		fi
+	fi
+
+	if [ "$door" != none ] && [ "${TU_TAILNET-no}" = yes ]; then
+		tailscaled_version=$(tailscaled_version)
+		if [ ! -x /usr/sbin/tailscaled ]; then
+			degrade tailscaled-missing "tailscaled is not installed: no tailnet door, the uplink" \
+				"door stays"
+		elif ! version_at_least_floor "$tailscaled_version"; then
+			degrade tailscaled-too-old "tailscaled $tailscaled_version is older than" \
+				"$TAILSCALE_FLOOR_MAJOR.$TAILSCALE_FLOOR_MINOR: no tailnet door, the uplink door" \
+				"stays"
+		elif [ ! -r "$STATE_DIR/tailnet/unlock.state" ]; then
+			degrade tailnet-state-missing "the unlock node is not enrolled: no tailnet door, the" \
+				"uplink door stays"
+		elif ! boot_space_fits; then
+			degrade boot-space "$BOOT_DIR has ${free_kb} KiB free and this image needs about" \
+				"${need_kb} KiB with tailscaled: no tailnet door, the uplink door stays"
+		else
+			copy_exec /usr/sbin/tailscaled /usr/sbin
+			if [ -r /etc/ssl/certs/ca-certificates.crt ]; then
+				mkdir -p "$DESTDIR/etc/ssl/certs"
+				cp /etc/ssl/certs/ca-certificates.crt "$DESTDIR/etc/ssl/certs/"
+			fi
+			mkdir -p "$DESTDIR/etc/tailnet-unlock"
+			cp "$STATE_DIR/tailnet/unlock.state" "$DESTDIR/etc/tailnet-unlock/unlock.state"
+			chmod 0600 "$DESTDIR/etc/tailnet-unlock/unlock.state"
+			tailnet=yes
+		fi
+	fi
+
+	mkdir -p "$DESTDIR/conf"
+	{
+		cat "$work/tailnet-unlock.conf"
+		printf "TU_DOOR='%s'\n" "$door"
+		printf "TU_HAS_RECOVERY='%s'\n" "$recovery"
+		printf "TU_TAILNET_IN_IMAGE='%s'\n" "$tailnet"
+		printf "TU_TAILSCALED_VERSION='%s'\n" "$(token "$tailscaled_version")"
+		printf "TU_SEALED_FP='%s'\n" "$(token "$sealed_fp")"
+		printf "TU_RECOVERY_FP='%s'\n" "$(token "$recovery_fp")"
+		printf "TU_DEGRADED='%s'\n" "$(token "$degraded")"
+	} >"$DESTDIR/conf/tailnet-unlock.conf"
+	if [ "$tailnet" != yes ]; then
+		printf "TU_TAILNET='no'\n" >>"$DESTDIR/conf/tailnet-unlock.conf"
+	fi
+
+	if mkdir -p "$STATE_DIR/images" 2>/dev/null; then
+		printf 'door=%s tailnet=%s recovery=%s degraded=%s\n' "$door" "$tailnet" "$recovery" \
+			"${degraded:--}" >"$STATE_DIR/images/${version:-unknown}"
+	fi
+	rm -rf "$work"
+	return 0
+}
+
+tu_hook || :
+exit 0
