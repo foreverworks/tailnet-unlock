@@ -1,6 +1,6 @@
 # tailnet-unlock: design
 
-Status: design, reviewed once (section 19). Nothing described here is built yet. Versions were read at
+Status: design, reviewed and re-reviewed (section 19). Nothing described here is built yet. Versions were read at
 their sources on 2026-11-21 (section 17); the build re-reads them when it starts.
 
 ## 1. Summary
@@ -204,6 +204,12 @@ The hook `/usr/share/initramfs-tools/hooks/tailnet-unlock`:
 6. **Never fails the build** (decision D18). Each part degrades on its own, loudly:
    - tailnet parts missing or unusable (no tailscaled, below the floor, no sealed state): the image
      is built without the tailnet door, and the uplink door stays;
+   - `/boot` too small for the tailnet parts: before it copies tailscaled, the hook compares the free
+     space on the file system that holds `/boot` with what the image will need (the current image for
+     this kernel, which `update-initramfs` keeps until the new one is complete, plus half of
+     tailscaled's size, the zstd estimate of 7.4, plus 16 MiB). When it does not fit, the image is
+     built without the tailnet door (`boot-space`, with both numbers in the warning), and the uplink
+     door stays. A full `/boot` never fails the build because of tailnet-unlock;
    - the sealed door key container missing or unreadable: the image carries only the recovery door,
      where enabled;
    - dropbear missing or the configuration invalid: the image carries no door, and the console stays.
@@ -225,24 +231,28 @@ package) into the image.
 1. **init-top**: initramfs-tools' `init` has already mounted `devpts` on `/dev/pts` (it does so in
    0.148.4), which dropbear needs for the operator's terminal; the premount script mounts it if it is
    missing. udev starts as usual.
-2. **init-premount/tailnet-unlock** (never blocks the boot; everything long runs in the background):
+2. **init-premount/tailnet-unlock** (never blocks the boot): mounts `devpts` if it is missing, mounts a
+   private tmpfs (mode 0700) at `/tailnet-unlock/run`, inside the initramfs root and not under `/run`,
+   because initramfs-tools moves `/run` into the real system (every file written there is 0600), and
+   starts the **supervisor** (`/usr/lib/tailnet-unlock/supervise`) in the background, recording its
+   PID. Everything long runs in the supervisor (decision D32):
    1. Loads the TPM driver and waits up to 10 seconds for `/dev/tpmrm0` (the kernel's resource
       manager).
    2. Brings up the uplink with initramfs-tools' `configure_networking` from the rendered `IP=` and
       `BOOTIF=` (DHCP or static, matched by MAC so interface names do not matter), and writes
       `/etc/resolv.conf` from the DHCP answer or the configured resolvers.
-   3. Mounts a private tmpfs (mode 0700) at `/tailnet-unlock/run`, inside the initramfs root and not
-      under `/run`, because initramfs-tools moves `/run` into the real system. Every file written
-      there is 0600.
-   4. Unseals the door key into that tmpfs (section 8.4). On failure it records why and, if the
+   3. Unseals the door key into the tmpfs (section 8.4). On failure it records why and, if the
       recovery door is enabled, uses the recovery key instead.
-   5. Starts dropbear in the background:
-      `dropbear -r <key> -p 127.0.0.1:<port> -p <uplink address>:<port> -s -j -k -I 600 -P <tmpfs>/dropbear.pid`
+   4. Starts dropbear in the foreground of its own child process, so the supervisor holds its PID:
+      `dropbear -F -E -r <key> -p 127.0.0.1:<port> -p <uplink address>:<port> -s -j -k -I 600 -P <tmpfs>/dropbear.pid`
       (`-p [address:]port` may repeat; `-s` refuses passwords, `-j -k` refuse forwarding, `-I` ends
       idle sessions). `127.0.0.1` serves the tailnet path; the uplink address is the one
       `configure_networking` set. Under the recovery key, the `127.0.0.1` listener is left out unless
       `door.recovery = "uplink+tailnet"`. dropbear never generates keys on its own here (no `-R`).
-   6. If the tailnet door is on (`tailnet.enabled`), starts
+      As soon as dropbear has written its PID file, the supervisor deletes the plaintext door key:
+      dropbear 2025.89 keeps its host key in memory and does not read the file again for new
+      connections (checked in M1), so from then on the unsealed key exists only inside dropbear.
+   5. If the tailnet door is on (`tailnet.enabled`), starts
       `tailscaled --state=<tmpfs copy of the sealed state> --encrypt-state --tun=userspace-networking
       --socket=<tmpfs>/tailscaled.sock --no-logs-no-support`. The state already holds the login, the
       tags and `WantRunning`, so no `tailscale up` runs at boot. In userspace networking, tailscaled's
@@ -250,8 +260,17 @@ package) into the image.
       (`wgengine/netstack/netstack.go`, read at v1.104.7), which is where dropbear listens. If the
       state does not unseal, tailscaled exits with `failed to unseal state file` and the console says
       the tailnet door is down; the uplink door keeps working.
-   7. Prints one summary to the console: profile, seal result, uplink address, unlock node name, the
+   6. Prints one summary to the console: profile, seal result, uplink address, unlock node name, the
       fingerprint of the key the door presents (sealed or recovery), the boot id.
+   7. **Supervises** both daemons until it is told to stop: every 2 seconds it checks each child PID,
+      and a daemon that has exited is started again after a backoff that doubles from 1 to 30
+      seconds and resets after a minute of uptime. A dropbear restart unseals the door key again,
+      since its plaintext was deleted in step 4; a tailscaled restart starts from the same sealed
+      state copy. Each restart is printed on the console and counted, and the door's `status`
+      reports the counts (`restarts`). A daemon that cannot start at all (the unseal now fails, the
+      binary is gone) is retried at the longest backoff and reported, never given up on silently.
+      The supervisor's TERM handler is the one place that stops the daemons and wipes (step 5 and
+      the exit paths below).
 3. **ZFS import and key** (OpenZFS's `mountroot`): the pool is imported and `decrypt_fs` sources each
    load-key extension before it prompts. Ours:
    1. If the encryption root's `keylocation` is a file present in the image and no rehearsal is
@@ -261,6 +280,10 @@ package) into the image.
    4. Waits until the key status is `available`, whoever loaded it (the door or the console), then
       ends the console prompt by its PID and returns 0. In a rehearsal (section 13.2) it waits at most
       the configured minutes, then returns 1 so the local key loads.
+
+   A wrong key is not an exit. `zfs load-key` fails, the door answers `wrong-key` (or the console
+   asks again), and the wait goes on: only a key that loads, a rehearsal running out, or one of the
+   exit paths below ends it.
 4. **The door's forced command**, one per SSH session. It reads `SSH_ORIGINAL_COMMAND`, which dropbear
    sets for forced commands, matches it with one `case`, and never evaluates, splits or passes it to a
    shell:
@@ -268,10 +291,11 @@ package) into the image.
    ```sh
    # /usr/lib/tailnet-unlock/door <delivery|operator>   (the role is set by authorized_keys)
    role=$1
-   h='[0-9a-f]'
+   h='[0123456789abcdef]'
    case "${SSH_ORIGINAL_COMMAND-}" in
    status)
        door_status ;;
+   # shellcheck disable=SC2254 # $h is unquoted on purpose: each one is a bracket expression
    "unlock "$h$h$h$h$h$h$h$h-$h$h$h$h-$h$h$h$h-$h$h$h$h-$h$h$h$h$h$h$h$h$h$h$h$h)
        door_unlock "${SSH_ORIGINAL_COMMAND#unlock }" ;;
    '')
@@ -283,8 +307,12 @@ package) into the image.
    ```
 
    In a POSIX `case` pattern the quoted `"unlock "` is literal and each unquoted `$h` is a bracket
-   expression matching one lowercase hex digit, so the second branch matches exactly `unlock ` followed
-   by the 36-character shape of `/proc/sys/kernel/random/boot_id`.
+   expression listing the sixteen lowercase hex digits (a list, not a range, so no locale can widen
+   it), so the second branch matches exactly `unlock ` followed by the 36-character shape of
+   `/proc/sys/kernel/random/boot_id`. shellcheck warns about unquoted expansions in a pattern
+   (SC2254), which is what this line wants, so the warning is disabled on that line alone.
+   `door_refuse` prints its result line and exits, so a delivery key that sends the empty command
+   never falls through to `door_prompt`.
    - `status`: prints one JSON line (sealed or recovery key, boot id, profile, seal result, recorded
      degradations, backend, the encryption root it waits for and its `keyformat`, kernel release,
      tailscaled version).
@@ -301,9 +329,11 @@ package) into the image.
      strips exactly one trailing newline from a key source's output for `passphrase` and `hex` keys,
      and for `raw` keys sends exactly 32 bytes or refuses. Whether libzfs tolerates a stray newline is
      tested in M1, not assumed.
-5. The root mounts. **init-bottom/tailnet-unlock** stops tailscaled with SIGTERM (so the control plane
-   sees the unlock node go offline at once) and waits up to 10 seconds before SIGKILL, stops dropbear
-   by its PID, deletes the door material, unmounts the tmpfs, and flushes the uplink address it set,
+5. The root mounts. **init-bottom/tailnet-unlock** sends TERM to the supervisor, which stops tailscaled
+   with SIGTERM (so the control plane sees the unlock node go offline at once) and waits up to 10
+   seconds before SIGKILL, stops dropbear by its PID, deletes the door material and exits. If the
+   supervisor has not exited after 15 seconds, init-bottom kills it and does the same itself from the
+   recorded PIDs. It then unmounts the tmpfs, and flushes the uplink address it set,
    so the real system's network manager starts clean. It leaves one non-secret record,
    `/run/tailnet-unlock/boot.json` (who unlocked this boot: sealed door, recovery door, console or
    local key; the profile; the seal result; any degradation), which `status` and `commit` read on the
@@ -311,14 +341,52 @@ package) into the image.
 6. initramfs-tools switches to the real root and frees the initramfs. The box's own tailscaled starts
    its own node; the unlock node stays offline until the next boot.
 
-**Every exit path wipes the door material** (decision D26). Normal boot: step 5. A failure inside our
-premount script: its own cleanup removes what it wrote. initramfs-tools' `panic()`: it runs
-`/scripts/panic/*` before it opens a shell (initramfs-tools 0.148.4), and ours stops both daemons and
-deletes the door key and the node state there. **Under `measured` there is no initramfs shell at
-all**: the UKI's embedded command line carries `panic=10`, so `panic()` reboots instead of opening a
-shell, and `break=` or any other override cannot be added without changing PCR 12 (section 8.2), which
-keeps the sealed key shut. Under `tpm`, a person at the console can still reach a shell with `break=`;
-that person could unseal the `tpm` profile's key anyway, which is that profile's boundary.
+**Exit paths, and the wipe on each** (decision D26). Once the supervisor runs, a boot leaves the
+waiting initramfs by exactly one of these paths, and each one wipes the door material (stops both
+daemons, deletes the door key if it is still a file, the copies of the sealed container and node
+state, and the recovery key copy):
+
+1. **The root mounts** (step 5): init-bottom stops the supervisor, whose TERM handler wipes.
+2. **`panic()`**, which initramfs-tools calls for every failure it does not handle itself (a pool that
+   does not import, a root that does not mount, no `init` on the root) and for `break=`. In
+   initramfs-tools 0.148.4, `panic()` in `scripts/functions` tests `panic=` first: when it is set,
+   it sleeps, then reboots or halts and exits (lines 48 to 71), **before** it reaches
+   `run_scripts /scripts/panic` (line 73). A `panic=` on the command line therefore means no panic
+   script runs, and the door, tailscaled and the files in the tmpfs stay live through the sleep. So
+   neither profile sets `panic=`, and the two take different branches inside our panic script,
+   `/scripts/panic/tailnet-unlock`:
+   - **`tpm`**: the script sends TERM to the supervisor, wipes whatever is left from the recorded
+     PIDs, and returns; `panic()` then opens its shell for the person at the console. If that
+     person leaves the shell, the boot goes on without a door: the console prompt remains.
+   - **`measured`**: the UKI's embedded command line carries `tailnet-unlock.noshell`. The script
+     ignores INT, QUIT, TSTP, HUP and TERM, wipes, prints why, waits 10 seconds so the reason can
+     be read on the console, runs `reboot -f`, then `echo b > /proc/sysrq-trigger` should that
+     return, then sleeps forever. It never returns, so `panic()` never reaches its shell. The script
+     takes this branch when the rendered profile is `measured` or the word is on the command line,
+     so an image built without a valid configuration still keeps the shell shut. The supervisor
+     also sets `/proc/sys/kernel/panic` to 10 under `measured`, so a kernel panic reboots instead of
+     hanging (a hang opens no shell either; the reboot only saves a trip to the power switch).
+3. **A failure inside our premount script** before the supervisor starts: its own cleanup removes
+   what it wrote, and the boot goes on without a door.
+4. **`zfsdebug=1`** (OpenZFS's `scripts/zfs`, 2.3.9): after the root is mounted and before
+   init-bottom runs, it waits for ENTER and runs `/bin/sh` directly on `c`, without `panic()` and
+   without any panic script, while the door material is still live. Under `measured` the word is a
+   command line override, which changes PCR 12 (section 8.2), so a boot that carries it never
+   unsealed the door key and has nothing to hand out. Under `tpm` nothing stops it: it is a shell
+   beside the unsealed door, the same boundary as `break=`, since a person at the console can unseal
+   the `tpm` profile's key with the tools in the image anyway.
+
+A failed `zfs load-key` is not on this list: it is not an exit (step 3 above).
+
+**Under `measured` there is no initramfs shell at all.** `break=`, `zfsdebug=1`, `init=` or any
+other override cannot be added without changing PCR 12, which keeps the sealed key shut, and every
+`panic()` ends in our script's reboot. The price: a genuine boot whose pool does not import (a
+damaged pool, a missing disk) reboots about every 10 seconds plus the boot time, in a loop, with no
+shell to repair it from. The way out is outside the initramfs: the provider's rescue system (or any
+other boot medium) to import and repair the pool, or, when an older boot entry still imports, that
+entry in the boot menu (choosing an entry is not an edit). Under `tpm`, a person at the console can
+still reach a shell with `break=`; that person could unseal the `tpm` profile's key anyway, which is
+that profile's boundary.
 
 ### 7.4 Tailscale in early boot
 
@@ -344,7 +412,8 @@ that person could unseal the `tpm` profile's key anyway, which is that profile's
 - **headscale**: `tailnet.login_server` names it; nothing else changes.
 - **Size**: measured from Tailscale's own 1.104.7 amd64 tarball on 2026-11-21: `tailscaled` is 43.9 MB
   (21.5 MB at zstd level 9), the `tailscale` CLI 34.3 MB (16.7 MB at zstd level 9). The image carries
-  tailscaled only (D21); `enroll` checks `/boot` has room for every installed kernel's image.
+  tailscaled only (D21); `enroll` checks `/boot` has room for every installed kernel's image, and the
+  hook checks again at every build and degrades the image instead of failing it (7.2, step 6).
 
 ### 7.5 Tailnet policy
 
@@ -392,9 +461,12 @@ on the box with `dropbearkey -t ed25519` in a tmpfs, seals it, and deletes the p
 printed afterwards. `"import"` takes a key the consumer provisions from its own secret store
 (`tailnet-unlock enroll --door-key-file -` reads an ed25519 private key in OpenSSH or dropbear format on
 stdin, converted with `dropbearconvert`), seals it the same way and deletes the plaintext; its pin is
-known in advance. Both end in the same sealed container and the same pin. With `import`, the consumer's
-store is part of the door's trust. `door.recovery_key_source` takes the same two values for the
-recovery key.
+known in advance. For the door key, both sources end in the same sealed container and the same kind of
+pin. With `import`, the consumer's store is part of the door's trust. `door.recovery_key_source` takes
+the same two values for the recovery key (`enroll --recovery-key-file -` reads it the same way), but
+the recovery key is never sealed, whichever its source: it is stored unsealed by design (section 9),
+0600, with its public half beside it, and its pin is printed (or, imported, known in advance). "The
+same sealed container" holds for the door key alone.
 
 Why two sealing mechanisms (decision D6): Tailscale's sealing is maintained upstream, handles
 tailscaled's own writes and state format changes, and has no PCR policy. The door key is the one that
@@ -428,7 +500,7 @@ The door key is sealed to:
 | 0, 2 (opt-in) | Firmware code and option ROMs | Off by default: every firmware update would change them. |
 
 Under `measured` the recovery door is off by default (section 9), and the UKI's command line carries
-`panic=10` (section 7.3).
+`tailnet-unlock.noshell` and never `panic=` (section 7.3, exit paths).
 
 GRUB is not supported in `measured` (decided in review, section 19): GRUB measures every command it
 runs into PCR 8 and every file it reads into PCR 9, and predicting those across `update-grub` means
@@ -626,7 +698,9 @@ depend on the box. LUKS has real key slots and gets a separate recovery passphra
 
 Two calls over SSH as `root`, both through the forced command (section 7.3, step 4): `status`, then
 `unlock <boot_id>` with the key on stdin. The keyholder runs OpenSSH's client with
-`StrictHostKeyChecking=yes`, a known-hosts file generated from its pins, `HostKeyAlgorithms=ssh-ed25519`,
+`StrictHostKeyChecking=yes`, a known-hosts file generated from one pin at a time (the sealed pin; the
+recovery pin only where 10.2 step 2 allows it, and for `unlock --recovery`), so a session that
+connects proves which key the door presented, `HostKeyAlgorithms=ssh-ed25519`,
 `IdentitiesOnly=yes` and `BatchMode=yes`. A keyholder in userspace networking (a CI job, say) reaches the
 tailnet door through `ProxyCommand=tailscale nc %h %p`. The door listens on its own port (2222 by
 default, decision D17), so its key never collides with the real sshd's in a known-hosts file.
@@ -639,12 +713,22 @@ default, decision D17), so its key never collides with the real sshd's in a know
    exits at once. Watchers on several keyholders are the consumer's to coordinate (run one per host
    set).
 2. Waits up to `door_wait_minutes` (default 30) for any configured door (tailnet by node id, uplink by
-   address) to answer `status` with the **pinned sealed key**. A door presenting the recovery key ends
-   the delivery ("recovery door, manual only") unless `allow_recovery_delivery = true`.
-3. Builds the approval request (10.3) from the door's status, the keyholder's view of the unlock node
-   (10.4), the reason and the host's history.
-4. Runs the approver with the request on stdin. No approver configured means refused.
-5. On approval, reads `status` again and checks the same boot id and the same door key.
+   address) to answer `status` through a known-hosts file that holds the **sealed pin alone**. A door
+   that fails that host key check is tried with a known-hosts file holding the recovery pin alone
+   only when `allow_recovery_delivery = true`; otherwise the delivery ends ("recovery door, manual
+   only"). **The door's role is the key the SSH client verified** (decision D31), never what the
+   door reports: `door.role` is `"sealed"` when the session verified against the sealed pin and
+   `"recovery"` when it verified against the recovery pin. A copy of `/boot` holds the recovery key
+   unsealed and can answer `status` with `"key": "sealed"`; the keyholder ignores that field for
+   every decision, and a door whose reported key differs from the verified one is refused and the
+   mismatch audited.
+3. Builds the approval request (10.3) from the verified role, the door's status, the keyholder's view
+   of the unlock node (10.4), the reason and the host's history.
+4. Runs the approver with the request on stdin. No approver configured means refused. For
+   `door.role = "recovery"` the keyholder refuses any approval that lacks
+   `"recovery_acknowledged": true`, whatever its `decision` says.
+5. On approval, reads `status` again, through the same single-pin known-hosts file, and checks the same
+   boot id and the same door key.
 6. Runs the key source, normalises its output (10.6) and pipes it straight into `unlock <boot_id>`.
    The key is never in an argument, an environment variable, a log line or a file the keyholder
    writes.
@@ -699,8 +783,9 @@ Request:
 }
 ```
 
-`door.role` is `"sealed"` or `"recovery"`. Everything under `boot` is what the door says about itself:
-an approver shows it to a person and never treats it as evidence.
+`door.role` is `"sealed"` or `"recovery"`, set from the host key the keyholder's SSH client verified
+(10.2 step 2). Everything under `boot` is what the door says about itself: an approver shows it to a
+person and never treats it as evidence.
 
 Response:
 
@@ -718,9 +803,10 @@ For `door.role = "recovery"`, an approval also needs `"recovery_acknowledged": t
 asked for at all when `allow_recovery_delivery = true`.
 
 **Binding, and who enforces it.** The request id is random (128 bits) and recorded as used once a
-delivery ends; the response must name it; `expires_at` bounds it; step 5 of `deliver` rechecks the boot
-id and the door key; the recovery gate is checked before the approver runs. All of that is enforced by
-the keyholder. The door enforces two things only: the authorized SSH key and its role, and that
+delivery ends; the response must name it; `expires_at` bounds it; `door.role` comes from the verified
+host key, never from the door's report; step 5 of `deliver` rechecks the boot id and the door key; the
+recovery gate is checked before the approver runs; a recovery approval without
+`"recovery_acknowledged": true` is refused. All of that is enforced by the keyholder. The door enforces two things only: the authorized SSH key and its role, and that
 `unlock` names this boot's id. A keyholder that skips its checks, or a compromised one, can send the
 key anyway.
 
@@ -863,7 +949,10 @@ repository once there are users who ask.
 
 A dpkg trigger on `/usr/sbin/tailscaled` rebuilds every initramfs when the Tailscale package changes,
 so each image carries the tailscaled the system runs, and `verify` reads each image's version against
-the floor, older kernels' images included.
+the floor, older kernels' images included. The trigger never fails its package (decision D18): its
+script runs `update-initramfs -u -k all`, reports a failure on stderr with a `W: tailnet-unlock:` line
+and in the record `verify` reads, and exits 0. A Tailscale upgrade that cannot rebuild an image
+leaves that image with the older tailscaled and a warning, never a half-configured package.
 
 **Removal guard** (decision D29): while the box is enrolled (a sealed door exists and the encryption
 root's `keylocation` is `prompt`), `prerm` refuses `remove` and `purge`, saying to run
@@ -974,8 +1063,9 @@ Every step leaves a box that boots:
 2. Write `box.toml`, `delivery_keys` and `operator_keys` (`enroll --import-dropbear-initramfs` carries
    over the authorized keys of an existing dropbear-initramfs setup; its host keys sat in plain text on
    `/boot` and are not reused).
-3. `tailnet-unlock enroll --auth-key-file <file>`: checks the prerequisites; generates (or imports)
-   and seals the door key; generates the recovery key if recovery is enabled; enrolls the unlock node
+3. `tailnet-unlock enroll --auth-key-file <file>`: checks the prerequisites; generates (or imports,
+   `--door-key-file -`) and seals the door key; generates (or imports, `--recovery-key-file -`) the
+   recovery key if recovery is enabled, and stores it unsealed; enrolls the unlock node
    with a second tailscaled (`--encrypt-state`, userspace networking, its own socket and state) from a
    single-use, pre-authorized, tagged, non-ephemeral auth key read from the file (`--auth-key=file:`),
    checks the state is sealed, stops it; turns rehearsal on; rebuilds every initramfs and reads each
@@ -1118,7 +1208,7 @@ available to pull requests from forks. Debian 14 runs use initramfs-tools until 
 | T6 | A copy of `/boot` searched for secrets | no node key, machine key or sealed door key in plain text (searched for the known test values); the recovery key is there, as documented |
 | T7 | TPM cleared (swtpm state reset) | `tpm`: recovery door on the uplink and the console; `unlock --recovery` works; `enroll --replace` restores the door |
 | T8 | Another system booted on the same VM and TPM | `tpm`: it can unseal the door key (the documented boundary); `measured`: it cannot |
-| T9 | A modified initramfs, and an edited command line (`measured`) | the sealed key does not unseal; no recovery door (off by default); `panic()` reboots, no shell opens; `deliver` refuses |
+| T9 | `measured`: a modified initramfs; an edited command line (`break=premount`, `zfsdebug=1`); a genuine chain whose pool import is made to fail | the modified chain and the edited line do not unseal the sealed key and get no recovery door (off by default); `deliver` refuses them. On the failed import, the panic script's wipe line appears on the serial console, the door stops answering and the unlock node goes offline before the reset; the box reboots about every 10 seconds plus the boot time; no shell opens at any point, also with INT sent on the console |
 | T10 | Kernel update and reboot (`measured`) | the predicted branch unseals; a forced misprediction falls through as section 9 says, never a hang |
 | T11 | Tailscale package upgrade | every initramfs rebuilt by the trigger; `verify` reads the floor in each |
 | T12 | An approval for boot A replayed on boot B | refused (boot id) |
@@ -1127,22 +1217,27 @@ available to pull requests from forks. Debian 14 runs use initramfs-tools until 
 | T15 | `tailnet.enabled = false` | no Tailscale in any image; the uplink door alone |
 | T16 | Rehearsal and commit on a box with a local key | a failed delivery still boots with the local key; `commit` refuses until a door unlock happened |
 | T17 | `disable --local-key`; removal before and after `disable` | the box boots unattended again with no door; `prerm` refuses removal while enrolled and allows it after |
-| T18 | A degraded build (tailscaled removed, then the door container removed) | the kernel package configures; the image keeps the uplink door, then the recovery door; `verify` exits non-zero; the door's `status` names the degradation |
+| T18 | A degraded build (tailscaled removed; `/boot` too small for tailscaled; then the door container removed) | the kernel package configures; the image keeps the uplink door (`boot-space` names both sizes), then the recovery door; `verify` exits non-zero; the door's `status` names the degradation; a Tailscale upgrade whose rebuild fails still configures |
 | T19 | Tailnet Lock on, enrollment with a signed auth key, the state directory in tmpfs only | the unlock node comes up and is reachable at every boot |
 | T20 | The example policy loaded into headscale | a peer that is neither keyholder nor operator cannot reach the door's port; the door reaches nothing; a keyholder reaches only the door's port |
-| T21 | `door.key_source = "import"` | the imported key is sealed, its pin matches the one known in advance, no plaintext copy remains on the box |
+| T21 | `door.key_source = "import"` and `door.recovery_key_source = "import"` | the imported door key is sealed, its pin matches the one known in advance, no plaintext copy remains on the box; the imported recovery key is stored unsealed (0600) and its pin matches the one known in advance |
 | T22 | Door command grammar | anything but `status`, `unlock <uuid>` and, for operator keys, the empty command is refused; a raw key with a trailing newline and a passphrase with one are both handled as section 7.3 says |
-| T23 | LUKS backend (M7), dracut module (M5) | T1 to T22 again for each |
+| T23 | LUKS backend (M7), dracut module (M5) | T1 to T22 and T24 to T28 again for each |
+| T24 | A recovery delivery: `allow_recovery_delivery = true`, the TPM cleared | an approval without `"recovery_acknowledged": true` is refused and no key is sent; with it, the key reaches the recovery door; with the setting false, the approver is never asked |
+| T25 | A copy of `/boot` booted on another TPM, with a door changed to report `"key": "sealed"` | the sealed pin fails host key verification; with `allow_recovery_delivery = false` the delivery ends at the gate; with it true, the request says `"role": "recovery"`; the false report is refused and audited |
+| T26 | dropbear killed, then tailscaled killed, while the box waits | the supervisor starts each again within its backoff and prints it on the console; `status` counts the restarts; the restarted door presents the same sealed key; the boot then unlocks |
+| T27 | A wrong key through the door, then at the console | the door answers `wrong-key` and the wait goes on; the console asks again; the right key then unlocks |
+| T28 | `tpm`: `panic()` reached through `break=mount` and through a pool import made to fail | the panic script stops the supervisor and wipes before the shell opens (no dropbear or tailscaled process, no door material in the tmpfs); leaving the shell continues the boot with the console prompt only |
 
 ## 16. Milestones
 
 | Milestone | Delivers | Done when |
 |---|---|---|
 | M0 | This design | reviewed (section 19) |
-| M1 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, `unlock` by hand; the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T22 pass |
-| M2 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | T1, T4, T5, T6, T15, T19, T20 pass |
-| M3 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, audit, `watch`, `on_alarm` | T2, T3, T12, T13, T14 pass |
-| M4 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; release 0.1 after the release run and the hardware smoke test | T1 to T22 (`tpm`) pass on headscale and on a Tailscale tailnet |
+| M1 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, `unlock` by hand; the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 pass |
+| M2 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) pass |
+| M3 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, the role from the verified key, audit, `watch`, `on_alarm` | T2, T3, T12, T13, T14, T24, T25 pass |
+| M4 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; release 0.1 after the release run and the hardware smoke test | T1 to T22 and T24 to T28 (`tpm`) pass on headscale and on a Tailscale tailnet |
 | M5 | The dracut module, for Debian 14 | T23 (dracut) |
 | M6 | The `measured` profile (systemd-boot and UKI) | T8, T9, T10 pass, Secure Boot on and off |
 | M7 | The LUKS backend | T23 (LUKS) |
@@ -1204,11 +1299,13 @@ tools are pinned to the upstream versions above in pre-commit and CI.
 | D23 | Door key source `generate` or `import`, both sealed the same way | Consumers that already keep host keys in their own secret store can pin them in advance; the default keeps the plaintext from ever leaving the box. |
 | D24 | `on_alarm` is `alert` or `expire`, default `alert` | Expiring stops a cloned identity but strands a box behind NAT at its next genuine reboot; the safe generic default alerts, a consumer that prefers expiry sets it. |
 | D25 | Automated delivery refuses the recovery door unless `allow_recovery_delivery = true` and the approver acknowledges the recovery role | The recovery key is on `/boot` in plain text; sending to it must be a separate, explicit human decision. |
-| D26 | Door material wiped on every exit path; no initramfs shell under `measured` (`panic=10` in the UKI command line) | A shell inside a genuine initramfs, after the unseal, would hand out the sealed key; under `measured` that is the attack the profile exists to stop. |
+| D26 | Door material wiped on every exit path; no initramfs shell under `measured` (`tailnet-unlock.noshell` in the UKI command line, and our panic script wipes, then reboots and never returns); never `panic=` | A shell inside a genuine initramfs, after the unseal, would hand out the sealed key; under `measured` that is the attack the profile exists to stop. `panic=` would deny the shell too, but initramfs-tools 0.148.4 then reboots before any panic script runs, so nothing would wipe. |
 | D27 | Separate delivery keys (`restrict`) and operator keys (`no-port-forwarding,no-agent-forwarding,no-X11-forwarding`); the role set by the key line | People need a terminal for the no-echo prompt; automation needs nothing, so it gets nothing. |
 | D28 | CI: one check job on every push and pull request; the full matrix weekly; releases gated by the full matrix and the VM scenarios on Debian 13 and 14; no hosted job while the repository is private | Fast feedback for each change, the expensive runs where they matter, and nothing spent before the project is public. |
 | D29 | `prerm` refuses removal while the box is enrolled | Removing the hooks would leave the next initramfs without a door. |
 | D30 | TPM 2.0 is a hard requirement; no mode without it | Without a TPM the door's identity is plain text on `/boot`, which is the problem this project exists to fix. |
+| D31 | The keyholder derives the door's role only from the host key its SSH client verified, one pin per known-hosts file; the recovery pin is used only with `allow_recovery_delivery = true` or `unlock --recovery` | A copy of `/boot` holds the recovery key unsealed and can report anything about itself, including "sealed". |
+| D32 | A supervisor in the initramfs owns both daemons: it starts them, restarts them with a backoff, and is the one place that stops them and wipes | A door that dies while the box waits would otherwise strand a headless box until someone reaches its console; one owner of the PIDs makes every exit path wipe the same way. |
 
 ## 19. Review outcomes
 
@@ -1225,6 +1322,16 @@ The first review (2026-11-21) settled the open questions of the first draft:
 | O7 | Distribution | Release assets with checksums for 0.x; an apt repository later. |
 | O8 | Order of M5 to M7 | M5 (dracut), then M6 (`measured`), then M7 (LUKS). |
 | O9 | Default door port | 2222. |
+
+A security re-review (2026-11-21) found five gaps, fixed in this revision before any code:
+
+| # | Finding | Outcome |
+|---|---|---|
+| R1 | With `panic=` set, initramfs-tools 0.148.4 reboots before `/scripts/panic` runs, so under `measured` nothing wiped | No `panic=` in either profile; our panic script wipes and, under `measured`, reboots itself and never returns (7.3, exit paths; D26; T9, T28) |
+| R2 | The keyholder could take the door's role from the door's own report | The role is the pinned key the SSH client verified, one pin per known-hosts file (10.2; D31; T25) |
+| R3 | The recovery acknowledgement was not in the enforced list, and the recovery key's import had no flag | Refused without it (10.2 step 4, 10.3; T24); `--recovery-key-file -`, and the recovery key is never sealed (8.1; T21) |
+| R4 | A dropbear or tailscaled that dies while the box waits stayed dead | A supervisor restarts both with a backoff (7.3 step 2; D32; T26), and a wrong key is shown not to be an exit (T27) |
+| R5 | A full `/boot`, or a failing Tailscale trigger, could fail a package | The hook degrades to the uplink door (`boot-space`), and the trigger always exits 0 (7.2, 12.1; T18) |
 
 ## 20. Prior art
 

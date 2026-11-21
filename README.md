@@ -4,9 +4,9 @@
 
 tailnet-unlock is designed to put a small, locked-down SSH door into early boot and give it its own
 place on your tailnet, so the box can ask for its key over Tailscale (or headscale) even when it sits
-behind a home router with no public address. The door's identity is sealed to the machine's TPM, so a
-copied disk cannot pretend to be your box. The key comes from you, or from a machine you trust after
-an approval you control.
+behind a home router with no public address. The door's identity is to be sealed to the machine's TPM,
+so that a copied disk cannot pretend to be your box. The key is to come from you, or from a machine you
+trust after an approval you control.
 
 > **Status: design, not yet usable.** This repository holds the design ([DESIGN.md](DESIGN.md)) and
 > nothing you can install yet. Everything below describes what is planned. Read it, question it, open
@@ -71,9 +71,11 @@ Without it, the door's identity is a set of files on `/boot`. Anyone who copies 
 `/boot` partition, gets a door that looks exactly like yours: it can join your tailnet as your box and
 present your box's SSH host key. The next time something sends the key, it may send it to the copy.
 
-With the identity sealed, the copy holds ciphertext that only your machine's TPM can open. It cannot
-join the tailnet. It cannot present the host key your keyholder expects, and your keyholder will not
-send the key to anything else.
+With the identity sealed, the copy holds only ciphertext that your machine's TPM alone can open, so it
+can neither join the tailnet nor present the sealed host key your keyholder expects. The keyholder is
+designed to send the key only to a door that presents that sealed key, with one exception that stays
+yours to make: the recovery door below, which you unlock by hand (`unlock --recovery`), or
+automatically only if you turn that on and your approver confirms it.
 
 Because the TPM holds only the door, never the disk key, losing the TPM loses the door and nothing
 else. Your data is still yours: you unlock once, at the console or through the recovery door where you
@@ -87,10 +89,13 @@ host key, so you can still unlock it over the network.
 
 - **That second key is on `/boot` unsealed.** A copy of `/boot` can present the recovery door to anyone
   who can reach it.
-- **Any change to what boots lands the box in recovery, on purpose.** That includes a change someone
-  made to `/boot` to steal your key. So never trust the reason the door prints about itself ("the TPM
-  was cleared"): a tampered door can print anything. Send a key to the recovery door only when you know
-  the reason yourself, because you did it or your provider's console shows it.
+- **In the `measured` profile, any change to what boots lands the box in recovery, on purpose.** That
+  includes a change someone made to `/boot` to steal your key. The default profile is different: its
+  sealed key opens whatever boots, so a modified `/boot` opens the sealed door itself (the gap named in
+  the security model below), and recovery means the sealed key did not open at all. In both profiles,
+  never trust the reason the door prints about itself ("the TPM was cleared"): a tampered door, or a
+  copy of `/boot` booted somewhere else, can print anything. Send a key to the recovery door only when
+  you know the reason yourself, because you did it or your provider's console shows it.
 - Automated delivery refuses the recovery door unless you turn that on and your approver confirms, as
   a separate decision, that it is the recovery door.
 - It listens on the box's own address only, never on the tailnet unless you enable that. It is on by
@@ -188,8 +193,9 @@ end to end between your keyholder and the door. The coordination server sees tha
 approvers that ask a person. If you want unattended unlocks for planned reboots, you write that rule
 yourself, against a small contract, and you own the risk.
 
-**Does it work with headscale?** It is designed to, and the test plan runs its virtual machine
-scenarios against headscale every week and before every release.
+**Does it work with headscale?** It is designed to. The test plan is to run its virtual machine
+scenarios against headscale every week and before every release, once those scenarios exist and the
+project is public.
 
 **I use dropbear-initramfs today.** tailnet-unlock replaces it (two SSH servers cannot share early
 boot). `enroll` is planned to carry over your authorized keys. Your old host keys are not reused,
