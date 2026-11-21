@@ -1,0 +1,28 @@
+#!/bin/sh
+# Install the box's files into DESTDIR (default /) where the Debian package will put them.
+# Used by the container tests now and by debian/rules later (M4).
+set -eu
+here=$(cd "${0%/*}/.." && pwd)
+dest=${1:-/}
+i=$here/initramfs
+install -d "$dest/usr/lib/tailnet-unlock" "$dest/usr/share/initramfs-tools/hooks" \
+	"$dest/usr/share/initramfs-tools/scripts/init-premount" \
+	"$dest/usr/share/initramfs-tools/scripts/init-bottom" \
+	"$dest/usr/share/initramfs-tools/scripts/panic" \
+	"$dest/usr/share/initramfs-tools/conf.d" \
+	"$dest/etc/zfs/initramfs-tools-load-key.d" "$dest/etc/initramfs/post-update.d" \
+	"$dest/usr/lib/python3/dist-packages" "$dest/usr/sbin"
+for f in door supervise unseal; do install -m 0755 "$i/$f" "$dest/usr/lib/tailnet-unlock/$f"; done
+for f in lib.sh paths.sh; do install -m 0644 "$i/$f" "$dest/usr/lib/tailnet-unlock/$f"; done
+install -m 0755 "$i/hook" "$dest/usr/share/initramfs-tools/hooks/tailnet-unlock"
+install -m 0755 "$i/init-premount" "$dest/usr/share/initramfs-tools/scripts/init-premount/tailnet-unlock"
+install -m 0755 "$i/init-bottom" "$dest/usr/share/initramfs-tools/scripts/init-bottom/tailnet-unlock"
+install -m 0755 "$i/panic" "$dest/usr/share/initramfs-tools/scripts/panic/tailnet-unlock"
+install -m 0644 "$i/conf-umask" "$dest/usr/share/initramfs-tools/conf.d/tailnet-unlock"
+install -m 0644 "$i/zfs-load-key" "$dest/etc/zfs/initramfs-tools-load-key.d/tailnet-unlock"
+install -m 0755 "$i/post-update" "$dest/etc/initramfs/post-update.d/tailnet-unlock"
+rm -rf "$dest/usr/lib/python3/dist-packages/tailnet_unlock"
+cp -r "$here/src/tailnet_unlock" "$dest/usr/lib/python3/dist-packages/"
+find "$dest/usr/lib/python3/dist-packages/tailnet_unlock" -name __pycache__ -prune -exec rm -rf {} +
+printf '#!/bin/sh\nexec python3 -m tailnet_unlock "$@"\n' >"$dest/usr/sbin/tailnet-unlock"
+chmod 0755 "$dest/usr/sbin/tailnet-unlock"
