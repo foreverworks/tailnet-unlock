@@ -1,7 +1,7 @@
 # tailnet-unlock: design
 
-Status: design, for review. Nothing described here is built yet. Versions were read at their sources on
-2026-11-21 (section 17); the build re-reads them when it starts.
+Status: design, reviewed once (section 19). Nothing described here is built yet. Versions were read at
+their sources on 2026-11-21 (section 17); the build re-reads them when it starts.
 
 ## 1. Summary
 
@@ -14,14 +14,14 @@ makes the early-boot prompt reachable from anywhere on a tailnet:
   included.
 - The door's identity, its SSH host key and the unlock node's state, is **sealed to the machine's
   TPM**. A copy of the disk or of `/boot` holds only ciphertext that no other TPM can open, so it can
-  neither join the tailnet nor pose as the machine.
+  neither join the tailnet nor present the door's sealed host key.
 - The root key arrives over SSH, from an operator at a terminal or from a **keyholder** that sends it
-  only after a pluggable **approver** says yes for this one boot.
+  only after a pluggable **approver** says yes for this one boot. There is no hands-off mode built in.
 - The door shuts down before the real system starts; the system's own Tailscale node then comes up as
   usual.
 
 ZFS native encryption is the first backend. LUKS fits the same design with a different backend
-(section 11).
+(section 11). A TPM 2.0 is a hard requirement.
 
 ## 2. The problem
 
@@ -35,7 +35,7 @@ usual options each give something up:
 | TPM auto-unlock (Clevis, systemd-cryptenroll) | yes | yes | no, it boots itself | n/a |
 | dropbear-initramfs and a typed key | no | yes | yes | no |
 | Network-bound unlock (Tang, Mandos) | yes, while the server answers | yes | depends on where it is booted | only with extra plumbing |
-| **tailnet-unlock** | after an approval, which can be automated | yes | yes, unless an approver says yes | yes |
+| **tailnet-unlock** | only through an approval, which a consumer may automate | yes | yes, unless an approver says yes | yes |
 
 The remaining gap with plain dropbear-initramfs is identity: its SSH host key sits unencrypted on
 `/boot`, so anyone with a copy of `/boot` who can get on the network path can impersonate the
@@ -49,12 +49,14 @@ Goals:
 1. A box with an encrypted ZFS root reboots and is unlocked remotely, without its key on any of its
    disks, over the tailnet or its uplink.
 2. A copy of the disks, or of `/boot` alone, cannot join the tailnet as the unlock node and cannot
-   present the door's host key.
-3. The key is delivered only to the genuine door (pinned host key) and only after an approval bound to
-   one boot. The approval mechanism is the consumer's: a hook with a small contract, never a
+   present the door's sealed host key.
+3. The key is delivered only to a door presenting the pinned sealed key, and only after an approval
+   bound to one boot. The approval mechanism is the consumer's: a hook with a small contract, never a
    dependency.
-4. No step locks the owner out: every failure falls through to a door that still works (the recovery
-   door, the console), and a kernel, initramfs or Tailscale update needs no manual step.
+4. Every failure falls through to something that still works where the box allows it: the uplink
+   door, the recovery door where it is enabled and reachable, the console. A box behind NAT whose TPM
+   failed needs its console; nothing in this design changes that. Kernel, initramfs and Tailscale
+   updates need no manual step in the default profile.
 5. One switch turns the tailnet door off and leaves the uplink door and the console.
 6. A stranger with a Debian box and a tailnet (Tailscale or headscale) can install it, on a fresh
    install or an existing box, in an afternoon.
@@ -64,10 +66,11 @@ Non-goals:
 - Protecting a running machine: memory, DMA, cold boot, or root on the running system.
 - Defending against whoever controls the hardware's firmware (a hostile vendor, a provider who
   reflashes firmware).
-- Automatic unlock without an approval. The project ships no approver that says yes by itself
-  (open question O5).
-- Managing the TPM's owner, endorsement or lockout authorizations. The README recommends hardening;
-  the tool only needs the owner hierarchy usable with an empty authorization, as Tailscale does.
+- Automatic unlock without an approval. The project ships no approver that says yes by itself.
+- Changing the TPM's owner, endorsement or lockout authorizations. Section 8.6 gives the hardening an
+  owner should do by hand; `verify` reads that state and warns, and never changes it.
+- Machines without a TPM 2.0, and virtual TPMs whose state travels with the machine's snapshots (a
+  copy of the snapshot is a copy of the TPM, so sealing protects nothing there).
 - Installing Debian, or running an installer on the tailnet.
 - Network or iSCSI roots, Wi-Fi uplinks, and IPv6-only uplinks in the first releases.
 - Tailscale SSH in the initramfs (decision D5).
@@ -78,15 +81,18 @@ Non-goals:
 | Term | Meaning |
 |---|---|
 | Box | The machine with the encrypted root. |
+| initramfs | The small file system the kernel runs first, before the real root is mounted; it is where the root gets unlocked. |
+| Tailnet | A private network of devices joined through Tailscale or a headscale server. |
+| TPM | The Trusted Platform Module: a chip (or a firmware function) on the motherboard that can encrypt small secrets so that only this machine can decrypt them. |
 | Door | The SSH server in the initramfs. Every login runs one forced command that can report status or accept a key, nothing else. |
-| Door key | The door's ed25519 SSH host key, sealed to the TPM. Keyholders pin it. |
-| Recovery door | The same SSH server presenting a second, unsealed host key, used only when the door key does not unseal. Automated delivery never uses it. |
+| Sealed door key | The door's ed25519 SSH host key, sealed to the TPM. Keyholders pin it. |
+| Recovery door | The same SSH server presenting a second, unsealed host key, used only when the sealed key does not unseal and recovery is enabled. Automated delivery refuses it by default. |
 | Unlock node | The door's own tailnet node, `<host>-unlock`, tagged `tag:unlock`, persistent, separate from the box's own node. |
 | Keyholder | Any machine that holds root keys and delivers them: an operator's laptop, a CI job, a small home server. |
 | Key source | A command on the keyholder that prints one box's root key. |
 | Approver | A command on the keyholder that decides whether one delivery may happen. |
 | Watcher | A keyholder job that notices a box waiting at its door and starts a delivery. |
-| Profile | Which boot state the door key is sealed to: `tpm` (default) or `measured`. |
+| Profile | Which boot state the sealed door key is bound to: `tpm` (default) or `measured`. |
 
 ## 5. Architecture
 
@@ -105,7 +111,7 @@ Non-goals:
  |  init-bottom/tailnet-unlock               |
  |   - stop tailscaled, dropbear; wipe       |     operator terminal
  +-------------------------------------------+     |  tailnet-unlock unlock <host>
-            |                                       |  or plain `ssh -p 2222 ...`
+            |                                       |  or plain `ssh -p 2222 root@...`
             v                                       +-----------------------------
  real root mounts; the box's own tailscaled and sshd start as usual
 ```
@@ -118,7 +124,7 @@ keys authenticate the keyholder. Neither side trusts the control plane for authe
 ### 6.1 Assets
 
 1. The root key (the ZFS wrapping key). Never stored on the box, never in the TPM.
-2. The door key. Whoever presents it is believed to be the box's genuine initramfs.
+2. The sealed door key. Whoever presents it is believed to be the box's genuine initramfs.
 3. The unlock node's state (machine and node private keys). Whoever holds it can appear on the
    tailnet as `<host>-unlock`.
 4. The approval. Whoever forges or replays one can make a keyholder send the key.
@@ -127,23 +133,24 @@ keys authenticate the keyholder. Neither side trusts the control plane for authe
 
 | Adversary | `tpm` profile (default) | `measured` profile | What it does not defend |
 |---|---|---|---|
-| **Stolen disk, or a copy** (a returned disk, a provider snapshot, a backup of `/boot`, a pulled `/boot`) | Defended. The door key and the node state are sealed by this TPM, so the copy cannot unseal them, cannot join the tailnet, cannot present the door key. The root stays encrypted; the key was never on the disk. | Same. | A copy of `/boot` holds the recovery door's key in plain text (section 9): someone on the box's network path could present the recovery door. Automation refuses it; a human must not send a key there without knowing why. |
-| **Stolen whole machine** | Partly. The thief can boot any system on the machine and unseal the door identity, or boot the genuine door at a new site. The root key is not on the machine, so the root opens only if an approver says yes. The approval request shows the endpoint the unlock node connects from against the box's expected site, and whether the reboot was planned. | The door key unseals only under the genuine boot chain, so it cannot be extracted under another system. The genuine chain still boots at the thief's site, so the approval remains the defense. | An approver who says yes to an unplanned reboot from an unknown endpoint. The endpoint is a hint, not a proof: a direct path shows the address the keyholder actually talks to, a relayed path only what the node reports (section 10.4). |
-| **Evil maid on `/boot` or the ESP** (brief physical access, or a provider's rescue system, used to modify the initramfs and leave) | **Not defended.** The `tpm` profile binds to the TPM, not to what booted, so a modified initramfs unseals the door key, receives the key on the next approved unlock and can leak it. | Defended for the door key: a modified boot chain changes PCR 4, the door key does not unseal, and the keyholder refuses a door that does not present it. The modified initramfs can still join the tailnet (open question O6) and can show the recovery door, which automation refuses. | Firmware implants (PCRs 0 and 2 are off by default), a hardware interposer on the TPM bus (mitigated: unseal uses an encrypted session), and an operator talked into using the recovery door. |
-| **Compromised tailnet peer** (any device on the tailnet that is not a keyholder) | Defended. The policy lets only keyholders and operators reach the door's port; `tag:unlock` reaches nothing. A peer that reaches the door anyway needs an authorized SSH key, and cannot pose as the door without the door key. | Same. | Denial of service by a peer the policy wrongly allows. |
+| **Stolen disk, or a copy** (a returned disk, a provider snapshot, a backup of `/boot`, a pulled `/boot`) | Defended. The sealed door key and the node state open only on this TPM, so the copy cannot unseal them, cannot join the tailnet, cannot present the sealed key. The root stays encrypted; the key was never on the disk. | Same. | The recovery door's key is on `/boot` unsealed, so a copy of `/boot` can present the recovery door to anyone who reaches it (section 9). An imported door key (section 8.1) also exists wherever its owner provisioned it; that store is part of the door's trust. |
+| **Stolen whole machine** | Partly. The thief can boot any system on the machine and unseal the door identity, or boot the genuine door at a new site. The root key is not on the machine, so the root opens only if an approver says yes. The approval request includes the endpoints the keyholder sees for the unlock node and whether the reboot was planned (section 10.4). | The sealed key unseals only under the genuine boot chain, so it cannot be extracted under another system. The genuine chain still boots at the thief's site, so the approval remains the defense. | An approver who says yes to an unplanned reboot. The endpoints are a hint for a person, not a proof of location: on a relayed path they are what the node reports, and `site_match` is then always `unverified`. |
+| **Evil maid on `/boot` or the ESP** (brief physical access, or a provider's rescue system, used to modify the initramfs and leave) | **Not defended.** The `tpm` profile binds to the TPM, not to what booted, so a modified initramfs unseals the door key, receives the key on the next approved unlock and can leak it. | Partly. A modified boot chain changes PCR 4, the sealed key does not unseal, and the keyholder refuses a door that does not present it. Such a chain lands in recovery on purpose: with recovery off (the default under `measured`) the box waits for its console; with recovery on, an operator who sends the key to the recovery door hands it to the modified chain. So `measured` does not close the gap by itself: it closes it only together with recovery off, or an operator who never trusts what the door says about itself. The modified chain can still join the tailnet (its node state is not under the PCR policy). | Firmware implants (PCRs 0 and 2 are off by default). A bus interposer on a discrete TPM: the door key is unsealed in an encrypted session, but Tailscale's node-state unseal runs without one (`feature/tpm/tpm.go`, read at v1.104.7), so an interposer can read the node identity. An attacker who can reset a discrete TPM without resetting the CPU and replay the expected measurements: PCR reset-and-replay is not stopped. |
+| **Compromised tailnet peer** (any device on the tailnet that is not a keyholder) | Defended. The policy lets only keyholders and operators reach the door's port; `tag:unlock` reaches nothing. A peer that reaches the door anyway needs an authorized SSH key, and cannot present the sealed key. | Same. | Denial of service by a peer the policy wrongly allows. |
 | **Hostile control plane** (the coordination server, or a headscale administrator) | Defended for confidentiality: it can add peers, reroute, show forged endpoints, and see metadata, but SSH runs end to end with a pinned host key, so it can neither collect the key nor pose as the door. | Same. | Denial of service, and metadata (when boxes reboot and unlock). |
-| **Network attacker on the uplink path** | Defended by the pinned door key, as above. | Same. | Denial of service; the recovery door caveat above. |
-| **Replay** | A recorded SSH session is useless (fresh session keys). An approval is bound to one request id, one boot id, one door key and an expiry, and is used once (section 10.3). An old `/boot` image presents a door key the keyholder stopped pinning at the last rotation, and its unlock node was deleted then. | Same; an old image also needs its old boot chain. | A root key learned once keeps working against any disk copy taken before `rotate`. `zfs change-key` rewraps, but ZFS's master key changes only by re-encrypting the data (send and receive into a new encryption root). |
+| **Network attacker on the uplink path** | Defended by the pinned sealed key, as above. | Same. | Denial of service; the recovery door caveat above. |
+| **Replay** | A recorded SSH session is useless (fresh session keys). An approval is bound to one request id, one boot id, one door key and an expiry, and is used once (section 10.3); the keyholder enforces all of that except the boot id, which the door checks too. An old `/boot` image presents a door key the keyholder stopped pinning at the last rotation, and its unlock node was deleted then. | Same; an old image also needs its old boot chain. | A root key learned once keeps working against any disk copy taken before `rotate`. `zfs change-key` rewraps, but ZFS's master key changes only by re-encrypting the data (send and receive into a new encryption root). |
 
 Out of scope, said plainly: root on the running box (it holds the unlocked data and can rewrite the
-initramfs); a compromised keyholder (it holds the keys); an approver who approves the wrong thing;
-anyone who can cut the network, who can keep the box locked (the console still works).
+initramfs); a compromised keyholder (it holds the keys, and the approval binding is enforced on its
+side); an approver who approves the wrong thing; anyone who can cut the network, who can keep the box
+locked (the console still works).
 
 ### 6.3 The boundary in one sentence
 
 In the default `tpm` profile the root stays closed to whoever takes the disks or a copy of them, and a
-whole machine opens only with an approval; the `measured` profile adds protection against a modified
-boot chain.
+whole machine opens only with an approval; the `measured` profile, with recovery left off, adds
+protection against a modified boot chain.
 
 ## 7. The boot flow
 
@@ -151,15 +158,16 @@ boot chain.
 
 Debian 13.8 ("trixie", the current stable) builds its initramfs with initramfs-tools 0.148.4: the
 kernel package `linux-image-6.12.117+deb13-amd64` depends on `initramfs-tools`, then on any
-`linux-initramfs-tool`. OpenZFS's Debian packaging (`zfs-initramfs` 2.3.9 in trixie, 2.4.4 in
-trixie-backports) and `cryptsetup-initramfs` 2.7.5 ship their boot integration for initramfs-tools,
-and OpenZFS offers the extension point this design uses (`/etc/zfs/initramfs-tools-load-key.d/`).
+`linux-initramfs-tool`. OpenZFS's Debian packaging (`zfs-initramfs` 2.3.9 in trixie's `contrib`
+component, 2.4.4 in trixie-backports `contrib`) and `cryptsetup-initramfs` 2.7.5 ship their boot
+integration for initramfs-tools, and OpenZFS offers the extension point this design uses
+(`/etc/zfs/initramfs-tools-load-key.d/`).
 
 Debian 14 ("forky", testing) is moving: its kernel package `linux-image-7.3.4+deb14-amd64` now
-depends on `dracut` first (dracut 112 in forky, 106 in trixie). So the core logic lives in builder
-neutral POSIX shell under `/usr/lib/tailnet-unlock/initramfs/`, initramfs-tools gets thin hook and
-boot scripts in the first release, and a dracut module follows before Debian 14 is released
-(milestone M5).
+depends on `dracut` first (dracut 112 in forky, 106 in trixie). So the core logic lives in
+builder-neutral POSIX shell under `/usr/lib/tailnet-unlock/initramfs/`, initramfs-tools gets thin hook
+and boot scripts in the first release, and a dracut module follows before Debian 14 is released
+(milestone M5). Until then, Debian 14 boxes and test runs install initramfs-tools explicitly.
 
 ### 7.2 Build time (on the running system, at every `update-initramfs`)
 
@@ -168,27 +176,55 @@ The hook `/usr/share/initramfs-tools/hooks/tailnet-unlock`:
 1. Runs `tailnet-unlock render-initramfs`, which validates `/etc/tailnet-unlock/box.toml` and prints
    the shell assignments the boot scripts read (`conf/tailnet-unlock.conf` inside the image). The
    configuration has one source; the image carries a value derived from it at each build.
-2. Copies in: `dropbear` (from `dropbear-bin`), `tailscaled` (not the `tailscale` CLI, decision D21),
-   the few `tpm2_*` tools the unseal needs and the TSS device transport library they load at run
-   time, the CA bundle, and the TPM drivers (`tpm_tis`, `tpm_crb`), plus the uplink NIC's driver,
-   read from `/sys/class/net/<uplink>/device/driver/module` at each build.
-3. Copies in the door material: the sealed door key (`tpm` profile; in `measured` it stays on the ESP,
-   section 8.3), the recovery door key if enabled, the unlock node's sealed state, and
-   `authorized_keys`, each line rewritten with `restrict,command="/usr/lib/tailnet-unlock/door"` so
-   no key can be listed without its forced command.
-4. Checks `tailscaled --version` against the floor (Tailscale 1.86, where `--encrypt-state` arrived on
-   Linux) and fails if older.
-5. Fails the build, saying why, if anything above is missing (decision D18). initramfs-tools then
-   keeps the previous image for that kernel. An image is either complete or not written.
+2. Copies in `dropbear` (from `dropbear-bin`) with what it needs to look up its one user: a
+   `/etc/passwd` holding only `root:x:0:0:root:/root:/bin/sh`, `/etc/nsswitch.conf` with
+   `passwd: files`, and glibc's `libnss_files`, as Debian's own dropbear-initramfs hook does. The
+   initramfs has no other user, so every door login is `root`, confined by its forced command.
+3. Copies in `tailscaled` (not the `tailscale` CLI, decision D21), the `tpm2_*` tools the unseal needs
+   and the TSS device transport library they load at run time, the CA bundle, the TPM drivers
+   (`tpm_tis`, `tpm_crb`, where they are modules), and the uplink NIC's driver, read from
+   `/sys/class/net/<uplink>/device/driver/module` at each build.
+4. Copies in the door material: the sealed door key container (`tpm` profile; under `measured` it
+   stays on the ESP, section 8.3), the recovery door key if enabled, the unlock node's sealed state,
+   and `/root/.ssh/authorized_keys` (directory 0700, file 0600, as dropbear requires), rendered from two
+   plain lists so that no line can lack its options:
 
-The image is written with `UMASK=0077`, though nothing in it is useful without this TPM.
+   ```
+   # from /etc/tailnet-unlock/delivery_keys: automation, no terminal
+   restrict,command="/usr/lib/tailnet-unlock/door delivery" ssh-ed25519 AAAA... keyholder
+   # from /etc/tailnet-unlock/operator_keys: people, who need a terminal for the no-echo prompt
+   no-port-forwarding,no-agent-forwarding,no-X11-forwarding,command="/usr/lib/tailnet-unlock/door operator" ssh-ed25519 AAAA... alice
+   ```
+
+   `restrict` would also forbid the terminal a person types into, so operator lines name the
+   forbidden features one by one instead. The role (`delivery` or `operator`) comes from this file,
+   never from the client.
+5. Checks `tailscaled --version` against the floor (Tailscale 1.86, where `--encrypt-state` arrived on
+   Linux).
+6. **Never fails the build** (decision D18). Each part degrades on its own, loudly:
+   - tailnet parts missing or unusable (no tailscaled, below the floor, no sealed state): the image
+     is built without the tailnet door, and the uplink door stays;
+   - the sealed door key container missing or unreadable: the image carries only the recovery door,
+     where enabled;
+   - dropbear missing or the configuration invalid: the image carries no door, and the console stays.
+
+   Each degradation prints `W: tailnet-unlock: <what and why>` during the build, is recorded in the
+   image (the door's `status` reports it), and makes `tailnet-unlock verify` exit non-zero. A
+   post-update hook (`/etc/initramfs/post-update.d/tailnet-unlock`) prints one summary line per image.
+   A kernel package's configure step never fails because of tailnet-unlock, and a degraded image
+   never goes unreported.
+
+The image is written with `UMASK=0077`, because it holds the recovery door key unsealed when recovery
+is enabled.
 
 OpenZFS's own hook copies `/etc/zfs/initramfs-tools-load-key.d/tailnet-unlock` (shipped by this
 package) into the image.
 
 ### 7.3 Boot time
 
-1. **init-top**: initramfs-tools starts udev as usual.
+1. **init-top**: initramfs-tools' `init` has already mounted `devpts` on `/dev/pts` (it does so in
+   0.148.4), which dropbear needs for the operator's terminal; the premount script mounts it if it is
+   missing. udev starts as usual.
 2. **init-premount/tailnet-unlock** (never blocks the boot; everything long runs in the background):
    1. Loads the TPM driver and waits up to 10 seconds for `/dev/tpmrm0` (the kernel's resource
       manager).
@@ -196,11 +232,16 @@ package) into the image.
       `BOOTIF=` (DHCP or static, matched by MAC so interface names do not matter), and writes
       `/etc/resolv.conf` from the DHCP answer or the configured resolvers.
    3. Mounts a private tmpfs (mode 0700) at `/tailnet-unlock/run`, inside the initramfs root and not
-      under `/run`, because initramfs-tools moves `/run` into the real system.
-   4. Unseals the door key into that tmpfs (section 8). On failure it records why and, if the recovery
-      door is enabled, uses the recovery key instead.
-   5. Starts dropbear on `127.0.0.1:<port>` (the tailnet path) and `<uplink address>:<port>`, keys
-      only, no forwarding (`-s -j -k`), an idle limit of 10 minutes, the PID kept in the tmpfs.
+      under `/run`, because initramfs-tools moves `/run` into the real system. Every file written
+      there is 0600.
+   4. Unseals the door key into that tmpfs (section 8.4). On failure it records why and, if the
+      recovery door is enabled, uses the recovery key instead.
+   5. Starts dropbear in the background:
+      `dropbear -r <key> -p 127.0.0.1:<port> -p <uplink address>:<port> -s -j -k -I 600 -P <tmpfs>/dropbear.pid`
+      (`-p [address:]port` may repeat; `-s` refuses passwords, `-j -k` refuse forwarding, `-I` ends
+      idle sessions). `127.0.0.1` serves the tailnet path; the uplink address is the one
+      `configure_networking` set. Under the recovery key, the `127.0.0.1` listener is left out unless
+      `door.recovery = "uplink+tailnet"`. dropbear never generates keys on its own here (no `-R`).
    6. If the tailnet door is on (`tailnet.enabled`), starts
       `tailscaled --state=<tmpfs copy of the sealed state> --encrypt-state --tun=userspace-networking
       --socket=<tmpfs>/tailscaled.sock --no-logs-no-support`. The state already holds the login, the
@@ -210,7 +251,7 @@ package) into the image.
       state does not unseal, tailscaled exits with `failed to unseal state file` and the console says
       the tailnet door is down; the uplink door keeps working.
    7. Prints one summary to the console: profile, seal result, uplink address, unlock node name, the
-      fingerprint of the key the door presents (door or recovery), the boot id.
+      fingerprint of the key the door presents (sealed or recovery), the boot id.
 3. **ZFS import and key** (OpenZFS's `mountroot`): the pool is imported and `decrypt_fs` sources each
    load-key extension before it prompts. Ours:
    1. If the encryption root's `keylocation` is a file present in the image and no rehearsal is
@@ -220,26 +261,64 @@ package) into the image.
    4. Waits until the key status is `available`, whoever loaded it (the door or the console), then
       ends the console prompt by its PID and returns 0. In a rehearsal (section 13.2) it waits at most
       the configured minutes, then returns 1 so the local key loads.
-4. **The door's forced command** (`/usr/lib/tailnet-unlock/door`, one per SSH session) dispatches on
-   `SSH_ORIGINAL_COMMAND`, which dropbear sets for forced commands:
-   - `status`: prints one JSON line (door or recovery key, boot id from
-     `/proc/sys/kernel/random/boot_id`, profile, seal result, backend, the encryption root it waits
-     for, kernel release, tailscaled version).
-   - `unlock <boot_id>`: refuses if the boot id is not this boot's; waits up to 10 minutes for the
+4. **The door's forced command**, one per SSH session. It reads `SSH_ORIGINAL_COMMAND`, which dropbear
+   sets for forced commands, matches it with one `case`, and never evaluates, splits or passes it to a
+   shell:
+
+   ```sh
+   # /usr/lib/tailnet-unlock/door <delivery|operator>   (the role is set by authorized_keys)
+   role=$1
+   h='[0-9a-f]'
+   case "${SSH_ORIGINAL_COMMAND-}" in
+   status)
+       door_status ;;
+   "unlock "$h$h$h$h$h$h$h$h-$h$h$h$h-$h$h$h$h-$h$h$h$h-$h$h$h$h$h$h$h$h$h$h$h$h)
+       door_unlock "${SSH_ORIGINAL_COMMAND#unlock }" ;;
+   '')
+       [ "$role" = operator ] || door_refuse bad-command
+       door_prompt ;;
+   *)
+       door_refuse bad-command ;;
+   esac
+   ```
+
+   In a POSIX `case` pattern the quoted `"unlock "` is literal and each unquoted `$h` is a bracket
+   expression matching one lowercase hex digit, so the second branch matches exactly `unlock ` followed
+   by the 36-character shape of `/proc/sys/kernel/random/boot_id`.
+   - `status`: prints one JSON line (sealed or recovery key, boot id, profile, seal result, recorded
+     degradations, backend, the encryption root it waits for and its `keyformat`, kernel release,
+     tailscaled version).
+   - `unlock <boot_id>`: refuses unless the boot id is this boot's; waits up to 10 minutes for the
      encryption root to be named; then pipes at most 512 bytes of stdin into
      `zfs load-key -L prompt <encryption root>`, which reads key material from a stdin that is not a
-     terminal, whatever the key format. The key touches no file and no command line. Prints one JSON
-     result line (`loaded`, `wrong-key`, `not-waiting`, `boot-mismatch`) and exits 0, 1, 2 or 3.
-   - nothing (a person typing `ssh -p 2222 unlock@host`): prompts for the key with no echo, then as
-     `unlock`, without the boot id check, since the person is there.
+     terminal. The key touches no file and no command line. Prints one JSON result line (`loaded`,
+     `wrong-key`, `not-waiting`, `boot-mismatch`, `bad-command`) and exits 0, 1, 2, 3 or 4.
+   - the empty command, for `operator` keys only (a person typing `ssh -p 2222 root@web-1-unlock`):
+     asks for the key with echo off on the terminal, reads one line, so the newline is never part of
+     the key, then loads it as `unlock` does, without the boot id check, since the person is there.
+     A `raw` key cannot be typed; the prompt says so.
+   - **The key on the wire** is the key's bytes with no framing and no trailing newline. The keyholder
+     strips exactly one trailing newline from a key source's output for `passphrase` and `hex` keys,
+     and for `raw` keys sends exactly 32 bytes or refuses. Whether libzfs tolerates a stray newline is
+     tested in M1, not assumed.
 5. The root mounts. **init-bottom/tailnet-unlock** stops tailscaled with SIGTERM (so the control plane
    sees the unlock node go offline at once) and waits up to 10 seconds before SIGKILL, stops dropbear
    by its PID, deletes the door material, unmounts the tmpfs, and flushes the uplink address it set,
    so the real system's network manager starts clean. It leaves one non-secret record,
-   `/run/tailnet-unlock/boot.json` (who unlocked this boot: door, recovery door, console or local key;
-   the profile; the seal result), which `status` and `commit` read on the running system.
+   `/run/tailnet-unlock/boot.json` (who unlocked this boot: sealed door, recovery door, console or
+   local key; the profile; the seal result; any degradation), which `status` and `commit` read on the
+   running system.
 6. initramfs-tools switches to the real root and frees the initramfs. The box's own tailscaled starts
    its own node; the unlock node stays offline until the next boot.
+
+**Every exit path wipes the door material** (decision D26). Normal boot: step 5. A failure inside our
+premount script: its own cleanup removes what it wrote. initramfs-tools' `panic()`: it runs
+`/scripts/panic/*` before it opens a shell (initramfs-tools 0.148.4), and ours stops both daemons and
+deletes the door key and the node state there. **Under `measured` there is no initramfs shell at
+all**: the UKI's embedded command line carries `panic=10`, so `panic()` reboots instead of opening a
+shell, and `break=` or any other override cannot be added without changing PCR 12 (section 8.2), which
+keeps the sealed key shut. Under `tpm`, a person at the console can still reach a shell with `break=`;
+that person could unseal the `tpm` profile's key anyway, which is that profile's boundary.
 
 ### 7.4 Tailscale in early boot
 
@@ -253,18 +332,19 @@ package) into the image.
 - **Its own node, never the box's**: the box's node carries the box's grants, which the initramfs must
   never hold. The unlock node's name is derived (`<host>-unlock` unless configured) and keyholders pin
   it by node id, so a name Tailscale reserves after a re-enrollment never matters.
-- **Read-only state in practice**: tailscaled may update its state while it runs; the copy lives in the
-  tmpfs and is discarded at the handover. Nothing in the state needs to persist between boots for a
-  tagged node.
+- **The state directory is tmpfs only**: tailscaled may update its state while it runs; the copy lives
+  in the tmpfs and is discarded at the handover. Nothing in the state needs to persist between boots
+  for a tagged node; with Tailnet Lock, the node fetches the lock state again at each boot (scenario
+  T19 checks this).
 - **No log upload** (`--no-logs-no-support`), no Tailscale SSH, no accepted routes or DNS settings
   (set in the node's preferences at enrollment).
 - **Control plane reachability**: the CA bundle is copied in, and Tailscale falls back to its built-in
   bootstrap resolution when DNS fails. A clock far in the past breaks TLS to the control plane; the
   uplink door does not depend on the clock.
 - **headscale**: `tailnet.login_server` names it; nothing else changes.
-- **Size**: Tailscale's own tarball for 1.104.7 (amd64) is 41 MB compressed with both binaries. The
-  image carries tailscaled only; M2 measures the real growth per image, and `enroll` checks `/boot`
-  has room for every installed kernel.
+- **Size**: measured from Tailscale's own 1.104.7 amd64 tarball on 2026-11-21: `tailscaled` is 43.9 MB
+  (21.5 MB at zstd level 9), the `tailscale` CLI 34.3 MB (16.7 MB at zstd level 9). The image carries
+  tailscaled only (D21); `enroll` checks `/boot` has room for every installed kernel's image.
 
 ### 7.5 Tailnet policy
 
@@ -295,7 +375,7 @@ The example ships as `examples/policy.hujson` with policy tests:
 Notes the README repeats: a policy that still allows everything to everything defeats `tag:unlock`
 reaching nothing. The watcher needs to see the box's own node too, so give the keyholder at least one
 grant to it. With Tailnet Lock, the enrollment auth key must be signed (`tailscale lock sign`). headscale
-takes the equivalent `acls` rules.
+takes the equivalent `acls` rules, and the VM suite checks the same rules live against it (T20).
 
 ## 8. Sealing
 
@@ -303,21 +383,29 @@ takes the equivalent `acls` rules.
 
 | Secret | Sealed by | Policy | Where it lives |
 |---|---|---|---|
-| Unlock node state | Tailscale's own `--encrypt-state` | None: a transient SRK from the standard ECC P-256 template under the owner hierarchy, no authorization policy (`feature/tpm/tpm.go`, read at v1.104.7) | `/var/lib/tailnet-unlock/tailnet/unlock.state`, copied into each image |
-| Door key | tailnet-unlock, with `tpm2-tools` | The profile's PCR policy (8.2) | `tpm`: `/var/lib/tailnet-unlock/door/door.tpm`, copied into each image. `measured`: on the ESP (8.3) |
-| Recovery door key | Not sealed, by design (section 9) | None | `/var/lib/tailnet-unlock/door/recovery_host_key`, 0600, copied into each image |
+| Unlock node state | Tailscale's own `--encrypt-state` | None: a transient SRK from the standard ECC P-256 template under the owner hierarchy, no authorization policy, unsealed without a session (`feature/tpm/tpm.go`, read at v1.104.7) | `/var/lib/tailnet-unlock/tailnet/unlock.state`, copied into each image |
+| Sealed door key | tailnet-unlock, with `tpm2-tools` | The profile's PCR policy (8.2) | `tpm`: the container `/var/lib/tailnet-unlock/door/door.tpm/`, copied into each image. `measured`: on the ESP (8.3) |
+| Recovery door key | Not sealed, by design (section 9) | None | `/var/lib/tailnet-unlock/door/recovery_host_key`, 0600, copied into each image when recovery is enabled |
 
-Why two mechanisms (decision D6): Tailscale's sealing is maintained upstream, handles tailscaled's own
-writes and state format changes, and has no PCR policy. The door key is the one that authenticates the
-box, so it is the one that carries the measured policy. A tampered boot chain that still joins the
-tailnet reaches nothing and cannot present the door key.
+**Where the door key comes from** (decision D23): `door.key_source = "generate"` (the default) makes it
+on the box with `dropbearkey -t ed25519` in a tmpfs, seals it, and deletes the plaintext; the pin is
+printed afterwards. `"import"` takes a key the consumer provisions from its own secret store
+(`tailnet-unlock enroll --door-key-file -` reads an ed25519 private key in OpenSSH or dropbear format on
+stdin, converted with `dropbearconvert`), seals it the same way and deletes the plaintext; its pin is
+known in advance. Both end in the same sealed container and the same pin. With `import`, the consumer's
+store is part of the door's trust. `door.recovery_key_source` takes the same two values for the
+recovery key.
+
+Why two sealing mechanisms (decision D6): Tailscale's sealing is maintained upstream, handles
+tailscaled's own writes and state format changes, and has no PCR policy. The door key is the one that
+authenticates the box, so it is the one that carries the measured policy. A tampered boot chain that
+still joins the tailnet reaches nothing and cannot present the sealed key.
 
 The door key is an ed25519 dropbear key (about 83 bytes), which fits the TPM's 128-byte limit for
 sealed data, so no wrapping key is needed. tailnet-unlock creates its primary key transient at each use
-from the same standard SRK template Tailscale uses: no persistent handle is created or reused and no NV
-index is defined, so it never collides with other users of the TPM and leaves nothing behind
-(decision D8). Unseal runs in a salted session with parameter encryption, so the key does not cross
-the bus to a discrete TPM in clear.
+from the TCG SRK template's algorithms and attributes (ECC P-256, AES-128-CFB, the same kind of key
+Tailscale's sealing creates): no persistent handle is created or reused and no NV index is defined, so
+it never collides with other users of the TPM and leaves nothing behind (decision D8).
 
 Requirements on the TPM: TPM 2.0, an owner hierarchy usable with an empty authorization (the default,
 and what Tailscale's sealing needs too), and for `measured` an active SHA-256 PCR bank.
@@ -325,8 +413,8 @@ and what Tailscale's sealing needs too), and for `measured` an active SHA-256 PC
 ### 8.2 Profiles and PCRs
 
 **`tpm` (default).** No PCRs. The door key opens on this TPM whatever booted. Kernel, initramfs,
-boot loader and firmware updates never require a re-seal and never lock the owner out. Boundary: the
-first row of the threat table, not the evil maid row.
+boot loader and firmware updates never require a re-seal. Boundary: the first row of the threat
+table, not the evil maid row.
 
 **`measured`.** Requires UEFI, systemd-boot and a unified kernel image (UKI: kernel, initrd and command
 line in one PE file, built by `ukify`; systemd-boot 257.13 and systemd-ukify 257.13 are in trixie).
@@ -339,23 +427,102 @@ The door key is sealed to:
 | 12 | systemd-stub's command line overrides, credentials and add-ons | Must hold its expected value: an edited command line (`break=premount`, `init=/bin/sh`) cannot reach a shell inside a genuine initramfs and unseal from there. `loader.conf` gets `editor no`. |
 | 0, 2 (opt-in) | Firmware code and option ROMs | Off by default: every firmware update would change them. |
 
-GRUB is not supported in `measured` (open question O2): GRUB measures every command it runs into
-PCR 8 and every file it reads into PCR 9, and predicting those across `update-grub` means simulating its
-script interpreter. GRUB users get the `tpm` profile.
+Under `measured` the recovery door is off by default (section 9), and the UKI's command line carries
+`panic=10` (section 7.3).
 
-### 8.3 Where the measured blob lives
+GRUB is not supported in `measured` (decided in review, section 19): GRUB measures every command it
+runs into PCR 8 and every file it reads into PCR 9, and predicting those across `update-grub` means
+simulating its script interpreter. GRUB users get the `tpm` profile.
+
+### 8.3 The container, and where the measured one lives
+
+`door.tpm` is a directory, because the initramfs's shell cannot parse a structured file safely. It is
+written next to its final place and renamed into it, so a reader never sees half of one:
+
+| File | Content |
+|---|---|
+| `format` | The text `tailnet-unlock door 1` |
+| `profile` | `tpm` or `measured` |
+| `public` | The sealed object's `TPM2B_PUBLIC`, as `tpm2_create -u` writes it |
+| `private` | Its `TPM2B_PRIVATE`, as `tpm2_create -r` writes it |
+| `branches` | `measured` only: one line per policy branch, `pcr sha256:4,7,12 <n>` or `resets <count> <n>` |
+| `branch.<n>.digest` | `measured` only: that branch's 32-byte policy digest, which `PolicyOR` needs at unseal |
+| `pin` | The door key's public half in OpenSSH format, what keyholders pin |
 
 A secret sealed to a measurement of the initramfs cannot sit inside that initramfs: the measurement
-would include the secret. In `measured`, the sealed door key lives on the ESP
-(`<ESP>/tailnet-unlock/door.tpm`); the initramfs mounts the ESP read-only by the partition UUID recorded
-at build time, reads it, and unmounts it.
+would include the secret. Under `measured` the container lives on the ESP
+(`<ESP>/tailnet-unlock/door.tpm/`); the initramfs mounts the ESP read-only by the partition UUID
+recorded at build time, copies the container into its tmpfs, and unmounts it.
 
-### 8.4 Updates without lockout
+### 8.4 The tpm2-tools sequence
 
-In `tpm` nothing is re-sealed, ever. In `measured`:
+Option names as in tpm2-tools 5.7 (trixie); M1 checks each against the installed version. Every
+command runs with `TPM2TOOLS_TCTI=device:/dev/tpmrm0`, `-Q`, `umask 077`, and its context files in the
+tmpfs.
 
-1. **Policy shape**: `PolicyOR` of up to eight `PolicyPCR` branches. After a boot it has one branch, the
-   current chain.
+The primary key, at sealing and at every unseal (same template, so the same key):
+
+```
+tpm2_createprimary -Q -C o -g sha256 -G ecc256:aes128cfb \
+  -a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|noda|restricted|decrypt' \
+  -c primary.ctx
+```
+
+Sealing under `tpm`, on the running system:
+
+```
+tpm2_create -Q -C primary.ctx -g sha256 -a 'fixedtpm|fixedparent|userwithauth|noda' \
+  -i door_key -u door.tpm/public -r door.tpm/private
+```
+
+Sealing under `measured`: one trial session per branch, then `PolicyOR` when there are two or more
+(the TPM's `PolicyOR` needs at least two; with one branch, its digest is the policy):
+
+```
+tpm2_startauthsession -Q -S trial.ctx                                # a trial session
+tpm2_policypcr -Q -S trial.ctx -l sha256:4,7,12 -f branch.1.pcrs -L branch.1.digest
+tpm2_flushcontext trial.ctx
+# the optional one-boot relaxation (section 8.5):
+tpm2_startauthsession -Q -S trial.ctx
+tpm2_policycountertimer -Q -S trial.ctx -L branch.2.digest --eq resets=<next boot's count>
+tpm2_flushcontext trial.ctx
+tpm2_startauthsession -Q -S trial.ctx
+tpm2_policyor -Q -S trial.ctx -L policy.digest -l sha256:branch.1.digest,branch.2.digest
+tpm2_flushcontext trial.ctx
+tpm2_create -Q -C primary.ctx -g sha256 -a 'fixedtpm|fixedparent|adminwithpolicy|noda' \
+  -L policy.digest -i door_key -u door.tpm/public -r door.tpm/private
+```
+
+`-f branch.<n>.pcrs` holds the expected PCR values (the current or the predicted ones), so a branch
+can be built for a boot chain that has not booted yet.
+
+Unsealing in the initramfs, always in a session salted with the primary key and with response
+encryption on, so the door key does not cross the bus to a discrete TPM in clear:
+
+```
+tpm2_load -Q -C primary.ctx -u door.tpm/public -r door.tpm/private -c door.ctx
+# tpm:
+tpm2_startauthsession -Q --hmac-session -c primary.ctx -S s.ctx
+# measured:
+tpm2_startauthsession -Q --policy-session -c primary.ctx -S s.ctx
+tpm2_policypcr -Q -S s.ctx -l sha256:4,7,12            # the TPM compares its current values
+tpm2_policyor -Q -S s.ctx -l sha256:branch.1.digest,branch.2.digest   # two or more branches
+# both:
+tpm2_sessionconfig -Q s.ctx --enable-encrypt
+tpm2_unseal -Q -c door.ctx -p session:s.ctx -o /tailnet-unlock/run/door_key
+tpm2_flushcontext s.ctx; tpm2_flushcontext door.ctx; tpm2_flushcontext primary.ctx
+```
+
+A `resets` branch is tried in a fresh session (`tpm2_policycountertimer --eq resets=<n>` instead of
+`tpm2_policypcr`) when the PCR branch fails. This protects the door key only: Tailscale's unseal of the
+node state runs without a session.
+
+### 8.5 Updates without lockout
+
+Under `tpm` nothing is re-sealed, ever. Under `measured`:
+
+1. **Policy shape**: one `PolicyPCR` branch after a boot, the current chain; up to eight branches
+   joined by `PolicyOR` around an update.
 2. **Before an update reboots**: a kernel-install plugin, ordered after the plugin that places the new
    UKI on the ESP, predicts the next boot's PCR 4 by replaying this boot's event log
    (`/sys/kernel/security/tpm0/binary_bios_measurements`) with the new UKI's Authenticode digest (and
@@ -366,62 +533,98 @@ In `tpm` nothing is re-sealed, ever. In `measured`:
 3. **After a successful boot**: a unit on the running system re-seals to the chain that just booted and
    drops the other branches.
 4. **When the predictor cannot predict** (an event it does not recognise, a firmware update, a Secure
-   Boot database update that changes PCR 7), it says so and does nothing silently: the next boot lands
-   on the recovery door, or the owner opts in to a **one-boot relaxation**:
-   `tailnet-unlock reseal --next-boot-only` adds a branch bound by `PolicyCounterTimer` to the TPM's
-   reset count of the next boot, with no PCRs. That boot is protected at the `tpm` level only, then
-   step 3 closes the branch. It is never automatic.
-5. **A wrong prediction never hangs the box**: the door key does not unseal, the door falls through to
-   the recovery door and the console (section 9).
+   Boot database update that changes PCR 7), it says so and does nothing silently: the next boot cannot
+   unseal, so it lands on the recovery door if enabled, or on the console; or the owner opts in to a
+   **one-boot relaxation**: `tailnet-unlock reseal --next-boot-only` adds a branch bound by
+   `PolicyCounterTimer` to the TPM's reset count of the next boot, with no PCRs. That boot is protected
+   at the `tpm` level only, then step 3 closes the branch. It is never automatic.
+5. **A wrong prediction never hangs the box**: the sealed key does not unseal and the door falls
+   through as in section 9.
 6. `tailnet-unlock verify --next-boot` checks, before a planned reboot, that the default boot entry's
    predicted values satisfy the sealed policy.
 
-Whether the predictor is ours or `systemd-pcrlock` is open question O1: systemd-pcrlock does this
-prediction with a policy kept in an NV index, and its manual page in systemd 262 still says
-"this command is experimental for now".
+Whether the predictor is ours or `systemd-pcrlock` is decided when M6 starts (section 19).
+systemd-pcrlock does this prediction with a policy kept in an NV index; systemd 262.2 still marks it
+"This component is experimental and subject to change without advance notice."
 
-### 8.5 What sealing never covers
+### 8.6 TPM hardening the owner should do by hand
+
+tailnet-unlock does not change TPM authorizations (a non-goal); `verify` reads them and warns.
+
+1. **Read the TPM's state first**: `tpm2_getcap properties-variable` (`ownerAuthSet`,
+   `endorsementAuthSet`, `lockoutAuthSet`, `disableClear`, `inLockout`) and
+   `tpm2_getcap handles-persistent`. A second-hand machine can carry an earlier owner's provisioning:
+   persistent objects, NV indices, a lockout authorization set to a value nobody knows. tailnet-unlock
+   creates no persistent objects, so existing ones do not collide with it; an unknown lockout
+   authorization only blocks step 3 until the TPM is cleared from the firmware.
+2. **Keep the owner hierarchy's authorization empty**: tailnet-unlock and Tailscale's sealing both
+   create their primary key under it.
+3. **A TPM the OS can clear without anyone at the box**: with an empty lockout authorization, root on
+   the running system can clear the TPM (`tpm2_clear`); and a firmware whose Physical Presence
+   Interface is set not to prompt lets the OS queue a clear for the next boot. Either one destroys the
+   door: not the data, and not the secrecy of anything. To make a clear need someone at the box: set a
+   random lockout authorization (`tpm2_changeauth -c lockout`) and keep it with the keyholder, not on
+   the box; set `disableClear` (`tpm2_clearcontrol -C l s`), so the OS cannot clear even with that
+   authorization; in the firmware, require confirmation for TPM operations the OS requests, and set a
+   firmware setup password.
+4. **Firmware updates** can change PCRs 0, 2 and 7 and, on some machines, reset a firmware TPM.
+   Under `measured`, plan them with section 8.5 step 4.
+
+### 8.7 What sealing never covers
 
 The TPM never holds the root key (decision D9). Losing the TPM (cleared, failed, replaced with the
-motherboard) loses the door, never the data: the box boots through the recovery door or the console,
-and `tailnet-unlock enroll --replace` makes a new door.
+motherboard) loses the door, never the data: the box boots through the recovery door where enabled and
+reachable, or the console, and `tailnet-unlock enroll --replace` makes a new door.
 
 ## 9. Fallbacks
 
-The rule: every failure falls through to something that still works, never to a wait that nobody can
-end.
+The rule: every failure falls through to something that still works where the box allows it, never to
+a wait that nobody at a console could end.
 
 | Failure | Tailnet door | Uplink door | Console |
 |---|---|---|---|
-| None | door key | door key | always |
-| Door key does not unseal (TPM cleared, failed, or `measured` mismatch) | Recovery key, only if tailscaled's state still unsealed | Recovery key, if `door.recovery = true` | always |
-| Node state does not unseal | down | door key | always |
-| Control plane or DERP unreachable, DNS broken, clock wrong | down | door key | always |
-| Uplink down or behind NAT | as above | unreachable | always |
-| No TPM at all | not built | door key is plain, as dropbear-initramfs today, and `enroll` refuses it unless `--no-tpm` is given | always |
+| None | sealed key | sealed key | always |
+| Sealed key does not unseal (TPM cleared or failed, a firmware change, a `measured` mismatch, a modified boot chain) | recovery key only with `recovery = "uplink+tailnet"` and the node state still unsealing; otherwise down | recovery key with `recovery = "uplink"` or `"uplink+tailnet"`; nothing with `"off"` | always |
+| Node state does not unseal | down | sealed key | always |
+| Control plane or DERP unreachable, DNS broken, clock wrong | down | sealed key | always |
+| Uplink down, or the box behind NAT | as above | unreachable | always |
+| An image degraded at build time (section 7.2) | as recorded | as recorded | always |
 
-**Recovery door** (decision D16, open question O3). A second ed25519 key, generated at enrollment and
-kept unsealed. The door presents it only when the door key did not unseal, and its fingerprint is
-different, so a client knows which one answered. `deliver` refuses a recovery door outright; only
-`tailnet-unlock unlock --recovery <host>` sends to it, after printing why the door is in recovery and
-asking the operator to type the host name. Intended uses: the owner cleared the TPM, updated firmware,
-or replaced the board.
+There is no row for "no TPM": `enroll` refuses a box without a TPM 2.0 (decision D30).
+
+**The recovery door** (decision D16). A second ed25519 key, generated at enrollment (or imported) and
+**kept unsealed on `/boot`**, so a copy of `/boot` can present it. The door presents it only when the
+sealed key did not unseal, and its fingerprint is different, so a client knows which one answered.
+
+- `door.recovery`: `"off"`, `"uplink"` or `"uplink+tailnet"`. Default `"uplink"` under `tpm`, where a
+  cleared TPM must not strand a headless box that has an uplink. Default `"off"` under `measured`,
+  because a modified boot chain lands in recovery on purpose, and a recovery door would hand the key
+  to it. It is never offered over the tailnet unless set to `"uplink+tailnet"`.
+- **Never trust what the door says about itself.** A modified initramfs can print any reason for being
+  in recovery ("the TPM was cleared", "a firmware update"). Confirm the reason out of band: you cleared
+  the TPM yourself, you updated the firmware yourself, the provider's console shows it.
+- **Manual unlock**: `tailnet-unlock unlock --recovery <host>` prints that this is the recovery door
+  and asks the operator to type the host name before it sends.
+- **Automated delivery refuses the recovery door by default** (decision D25). A consumer that sets
+  `allow_recovery_delivery = true` gets requests with `door.role = "recovery"` (section 10.3), and the
+  approver must answer with `"recovery_acknowledged": true`. A consumer's approver should allow that
+  only behind a separate, explicit human approval that names the recovery door.
 
 **Console.** The load-key extension always runs a console prompt beside the door. A headless box is
 recovered through whatever console the owner has: a provider's KVM or serial console, a rescue system,
-or a person on site.
+or a person on site. For a box behind NAT whose TPM failed, the console is the only way back.
 
 **The recovery passphrase is the root key.** ZFS native encryption allows one wrapping key per
 encryption root, so a separate recovery passphrase cannot exist for the same root. The README
 therefore recommends a root key in a form a person can type at a console: `keyformat=passphrase` with
-a generated passphrase of at least 128 bits (decision D22). The delivery path does not care about the
-format. LUKS has real key slots and gets a separate recovery passphrase (section 11).
+a generated passphrase of at least 128 bits (decision D22), kept in at least two places that do not
+depend on the box. LUKS has real key slots and gets a separate recovery passphrase (section 11).
 
 ## 10. Key delivery
 
 ### 10.1 The door protocol
 
-Two calls over SSH, both through the forced command (section 7.3, step 4): `status`, then
+Two calls over SSH as `root`, both through the forced command (section 7.3, step 4): `status`, then
 `unlock <boot_id>` with the key on stdin. The keyholder runs OpenSSH's client with
 `StrictHostKeyChecking=yes`, a known-hosts file generated from its pins, `HostKeyAlgorithms=ssh-ed25519`,
 `IdentitiesOnly=yes` and `BatchMode=yes`. A keyholder in userspace networking (a CI job, say) reaches the
@@ -436,15 +639,16 @@ default, decision D17), so its key never collides with the real sshd's in a know
    exits at once. Watchers on several keyholders are the consumer's to coordinate (run one per host
    set).
 2. Waits up to `door_wait_minutes` (default 30) for any configured door (tailnet by node id, uplink by
-   address) to answer `status` with the **pinned door key**. A door presenting the recovery key ends
-   the delivery: "recovery door, manual only".
+   address) to answer `status` with the **pinned sealed key**. A door presenting the recovery key ends
+   the delivery ("recovery door, manual only") unless `allow_recovery_delivery = true`.
 3. Builds the approval request (10.3) from the door's status, the keyholder's view of the unlock node
    (10.4), the reason and the host's history.
 4. Runs the approver with the request on stdin. No approver configured means refused.
 5. On approval, reads `status` again and checks the same boot id and the same door key.
-6. Runs the key source and pipes its output straight into `unlock <boot_id>`. The key is never in an
-   argument, an environment variable, a log line or a file the keyholder writes.
-7. Waits for the box's own node to come online (the boot went on) and writes one audit line (10.7).
+6. Runs the key source, normalises its output (10.6) and pipes it straight into `unlock <boot_id>`.
+   The key is never in an argument, an environment variable, a log line or a file the keyholder
+   writes.
+7. Waits for the box's own node to come online (the boot went on) and writes one audit line (10.8).
 
 Exit codes say what happened: delivered, refused, timed out, door not found, wrong key.
 
@@ -466,6 +670,7 @@ Request:
   "host": "web-1",
   "reason": {"kind": "unplanned", "started_by": null, "note": null},
   "door": {
+    "role": "sealed",
     "kind": "tailnet",
     "address": "web-1-unlock",
     "port": 2222,
@@ -476,11 +681,14 @@ Request:
     "kernel": "6.12.117+deb13-amd64",
     "profile": "tpm",
     "seal": "ok",
+    "degraded": [],
     "backend": "zfs",
-    "waiting_for": "rpool/ROOT",
+    "waiting_for": "rpool",
+    "keyformat": "passphrase",
     "tailscaled": "1.104.7"
   },
   "network": {
+    "path": "direct",
     "observed_endpoint": "198.51.100.7:41641",
     "relay": null,
     "reported_endpoints": ["198.51.100.7:41641", "192.0.2.10:41641"],
@@ -491,6 +699,9 @@ Request:
 }
 ```
 
+`door.role` is `"sealed"` or `"recovery"`. Everything under `boot` is what the door says about itself:
+an approver shows it to a person and never treats it as evidence.
+
 Response:
 
 ```json
@@ -498,14 +709,20 @@ Response:
   "schema": "tailnet-unlock.approval-response/1",
   "request_id": "0b9d1c6e7a2f4e1d9c3b5a7e8f60d4c2",
   "decision": "approve",
-  "by": "operator key SHA256:pQ8EXAMPLEONLYa1b2c3d4e5f6g7h8i9j0k",
+  "by": "alice, key SHA256:pQ8EXAMPLEONLYa1b2c3d4e5f6g7h8i9j0k",
   "note": "kernel update this morning"
 }
 ```
 
-Replay protection: the request id is random (128 bits) and recorded as used once a delivery ends;
-the approval names it; step 5 rechecks the boot id and door key, and `unlock` refuses any other boot.
-An approval for one boot cannot open another.
+For `door.role = "recovery"`, an approval also needs `"recovery_acknowledged": true`, and is only
+asked for at all when `allow_recovery_delivery = true`.
+
+**Binding, and who enforces it.** The request id is random (128 bits) and recorded as used once a
+delivery ends; the response must name it; `expires_at` bounds it; step 5 of `deliver` rechecks the boot
+id and the door key; the recovery gate is checked before the approver runs. All of that is enforced by
+the keyholder. The door enforces two things only: the authorized SSH key and its role, and that
+`unlock` names this boot's id. A keyholder that skips its checks, or a compromised one, can send the
+key anyway.
 
 A consumer with its own approval service writes a small approver that calls it and prints the response.
 Nothing in tailnet-unlock knows about that service.
@@ -515,16 +732,19 @@ Nothing in tailnet-unlock knows about that service.
 The watcher and `deliver` read the keyholder's own `tailscale status --json` (decision D12): each
 peer's `Online`, `LastSeen`, `CurAddr` (the address the keyholder's WireGuard session actually talks
 to, when the path is direct), `Relay`, and `Addrs` (the endpoints the node reports). No API token is
-needed, and it works the same with headscale. When the path is direct, `observed_endpoint` is an
-address the keyholder exchanged packets with. When it is relayed, the request says so and only the
-reported endpoints remain, which a modified client can invent. Approvers that check the site should
-treat `site_match` as a hint for a person, not a proof.
+needed, and it works the same with headscale.
+
+`network.path` is `"direct"` or `"relayed"`. On a direct path, `observed_endpoint` is an address the
+keyholder exchanged packets with, and `site_match` is `"yes"` or `"no"` against `expected_endpoints`.
+On a relayed path, `observed_endpoint` is null, only the node's own reports remain (a modified client
+can invent them), and `site_match` is always `"unverified"`, whatever the reports say. The request
+shows endpoints; it does not prove where the door is.
 
 ### 10.5 Built-in approvers, and a complete one that needs nothing but SSH
 
 Built in: `deny` (what an empty setting means), `tty` (used by the interactive `unlock`: shows the
 request and asks the operator to type the host name) and `ssh`, below. There is deliberately no
-approver that says yes on its own (open question O5).
+approver that says yes on its own.
 
 **The SSH approver.** The approval is an SSH login by a person, ideally with a FIDO2 security key, so a
 touch is the approval.
@@ -537,6 +757,12 @@ useradd --system --create-home unlock-approve
 # in ~unlock-approve/.ssh/authorized_keys, one line per person, the options followed by that
 # person's public key (a security key made with `ssh-keygen -t ed25519-sk`):
 restrict,pty,command="tailnet-unlock approver ssh respond --as alice" <alice's ed25519-sk public key>
+```
+
+```
+# /etc/ssh/sshd_config.d/tailnet-unlock-approve.conf: lets the forced command read which key logged in
+Match User unlock-approve
+    ExposeAuthInfo yes
 ```
 
 In `keyholder.toml`:
@@ -554,10 +780,12 @@ Flow:
    `/var/lib/tailnet-unlock/keyholder/approvals/pending/<request_id>.json` (readable by the
    `unlock-approve` account), runs `notify` if set, and waits.
 2. The operator runs `ssh -t unlock-approve@keyholder` and touches the key. The forced command lists
-   pending requests, prints the one chosen in full (host, reason, door, boot, endpoints, site match),
-   and asks for the host name to approve or `no` to refuse.
-3. It writes `decided/<request_id>.json` with `by` set to the person and the fingerprint of the key
-   that logged in, and exits.
+   pending requests, prints the one chosen in full (host, reason, door and its role, what the door
+   says about itself, endpoints, site match), and asks for the host name to approve or `no` to refuse.
+   A recovery request says so first and asks separately.
+3. It writes `decided/<request_id>.json` with `by` set to the name from the line (`--as alice`) and the
+   fingerprint of the key that logged in, read from the file `$SSH_USER_AUTH` names, which sshd provides
+   only with `ExposeAuthInfo yes`. It exits.
 4. The waiting approver reads the decision, prints the response, and exits 0. Timeout or refusal: no
    key is sent.
 
@@ -568,8 +796,10 @@ the hook can `ssh` there instead of writing a local spool.
 
 An argument list per host, run without a shell, that prints the key on stdout and exits 0, for example
 `["pass", "show", "unlock/web-1"]`, `["sops", "--decrypt", "--extract", "[\"root_key\"]", "web-1.yaml"]`,
-or `["cat", "/srv/keys/web-1.key"]` on an encrypted keyholder disk. At most 512 bytes are read. Its
-output goes into the SSH session's stdin and nowhere else.
+or `["cat", "/srv/keys/web-1.key"]` on an encrypted keyholder disk. At most 513 bytes are read. For
+`passphrase` and `hex` keys (the door's `status` reports the `keyformat`) exactly one trailing newline
+is removed; a `raw` key must be exactly 32 bytes. The result goes into the SSH session's stdin and
+nowhere else.
 
 ### 10.7 The watcher and the alarm
 
@@ -580,23 +810,25 @@ output goes into the SSH session's stdin and nowhere else.
 |---|---|---|
 | online | offline | nothing |
 | offline | online | the box waits at its door: start `deliver --reason unplanned`, unless a planned marker (`tailnet-unlock planned <host> --by <who> --for 30m`) makes it `planned` |
-| online | online | **alarm**: read again after 60 seconds; if it persists, run the `alarm` hook. Something is using the unlock identity while the box runs. |
+| online | online | **alarm**: read again after 60 seconds; if it persists, act on `on_alarm`. Something is using the unlock identity while the box runs. |
 | offline | offline | nothing (the box is down or between states) |
 
 The uplink door is probed too for hosts that have one, so a box whose tailnet door is down is still
 found.
 
-The alarm action defaults to alerting only. Expiring the unlock node's key on alarm stops a cloned
-identity, and also takes away the tailnet door at the next genuine reboot until a re-enrollment, so it
-is an explicit option (open question O4). An enrollment shows the unlock node online for a few seconds
-while the box runs; a watcher pass in that window raises the alarm once, as it should.
+`on_alarm = "alert" | "expire"` (decision D24). `alert`, the default, runs the `alarm` hook. `expire`
+also expires the unlock node's key through the control plane's API (which needs an API credential with
+device write access): it stops a cloned identity at once, and also takes away the tailnet door at the
+next genuine reboot until a re-enrollment, which strands a box behind NAT. Neither deletes the node.
+An enrollment shows the unlock node online for a few seconds while the box runs; a watcher pass in that
+window raises the alarm once, as it should.
 
 ### 10.8 Audit
 
 One JSON line per delivery attempt on stdout and in `/var/log/tailnet-unlock/audit.jsonl`: time,
-host, request id, reason, door, door key fingerprint, boot id, endpoints, the approver's decision and
-`by`, the result. Never the key. A test greps every log the suite produces for the key bytes
-(section 15).
+host, request id, reason, door and its role, door key fingerprint, boot id, path and endpoints, the
+approver's decision and `by`, the result. Never the key. A test greps every log the suite produces for
+the key bytes (section 15).
 
 ## 11. LUKS
 
@@ -619,29 +851,35 @@ One source package, three binary packages, `Architecture: all`:
 
 | Package | Contents | Depends |
 |---|---|---|
-| `tailnet-unlock` | initramfs-tools hook and scripts, the door command, the ZFS load-key extension, the box CLI, the dpkg trigger | `python3-tailnet-unlock`, `initramfs-tools`, `dropbear-bin`, `tpm2-tools`, `tailscale (>= 1.86)` (from Tailscale's own apt repository), `zfs-initramfs` for the ZFS backend; Conflicts: `dropbear-initramfs` (decision D2) |
+| `tailnet-unlock` | initramfs-tools hook and scripts (including `scripts/panic`), the door command, the ZFS load-key extension, the box CLI, the dpkg trigger, the `prerm` guard | `python3-tailnet-unlock`, `initramfs-tools`, `dropbear-bin`, `tpm2-tools`, `tailscale (>= 1.86)` (from Tailscale's own apt repository), `zfs-initramfs` (Debian `contrib`) for the ZFS backend; Conflicts: `dropbear-initramfs` (decision D2) |
 | `tailnet-unlock-keyholder` | `deliver`, `unlock`, `watch`, approvers, examples | `python3-tailnet-unlock`, `openssh-client` |
 | `python3-tailnet-unlock` | the Python package both use | `python3 (>= 3.13)` |
 
 For keyholders that are not Debian (a laptop, a CI image): a single-file zipapp,
 `tailnet-unlock-keyholder.pyz`, attached to each release; the code uses the standard library only.
 
-Distribution at first: `.deb` files and the zipapp as GitHub release assets with checksums (open
-question O7 for an apt repository).
+Distribution: `.deb` files and the zipapp as GitHub release assets with checksums for 0.x; an apt
+repository once there are users who ask.
 
 A dpkg trigger on `/usr/sbin/tailscaled` rebuilds every initramfs when the Tailscale package changes,
 so each image carries the tailscaled the system runs, and `verify` reads each image's version against
 the floor, older kernels' images included.
+
+**Removal guard** (decision D29): while the box is enrolled (a sealed door exists and the encryption
+root's `keylocation` is `prompt`), `prerm` refuses `remove` and `purge`, saying to run
+`tailnet-unlock disable` first: removing the hooks would leave the next initramfs without a door.
+Upgrades are not affected.
 
 ### 12.2 Files
 
 | Path | What |
 |---|---|
 | `/etc/tailnet-unlock/box.toml` | Box configuration |
-| `/etc/tailnet-unlock/authorized_keys` | Keys that may use the door, plain; the hook adds `restrict` and the forced command |
-| `/var/lib/tailnet-unlock/door/` | `door.tpm` (sealed), `door.pub`, `recovery_host_key` (0600), `recovery_host_key.pub` |
+| `/etc/tailnet-unlock/delivery_keys` | Keyholder keys, plain; the hook adds `restrict` and the `delivery` forced command |
+| `/etc/tailnet-unlock/operator_keys` | People's keys, plain; the hook adds the `no-*` options and the `operator` forced command |
+| `/var/lib/tailnet-unlock/door/` | `door.tpm/` (the container, section 8.3), `recovery_host_key` (0600) and its `.pub` |
 | `/var/lib/tailnet-unlock/tailnet/unlock.state` | The unlock node's state, sealed by tailscaled |
-| `/var/lib/tailnet-unlock/pins.toml` | Public: what keyholders pin (door and recovery fingerprints, node id, addresses) |
+| `/var/lib/tailnet-unlock/pins.toml` | Public: what keyholders pin (sealed and recovery fingerprints, node id, addresses) |
 | `/etc/zfs/initramfs-tools-load-key.d/tailnet-unlock` | The ZFS load-key extension |
 | `/etc/tailnet-unlock/keyholder.toml` | Keyholder configuration (or `$XDG_CONFIG_HOME/tailnet-unlock/keyholder.toml`) |
 | `/var/lib/tailnet-unlock/keyholder/` | Locks, planned markers, used request ids, the SSH approver's spool |
@@ -654,7 +892,10 @@ backend = "zfs"            # "zfs"; "luks" from M7
 
 [door]
 port = 2222
-recovery = true            # the recovery door (section 9)
+key_source = "generate"    # or "import": `enroll --door-key-file -` reads a key you provision
+# recovery = "uplink"      # "off", "uplink" or "uplink+tailnet";
+                           # unset: "uplink" under the tpm profile, "off" under measured
+recovery_key_source = "generate"
 idle_timeout_seconds = 600
 
 [network]
@@ -690,7 +931,8 @@ approver = ["tailnet-unlock", "approver", "ssh", "request"]
 approval_timeout_seconds = 900
 door_wait_minutes = 30
 alarm = ["logger", "-t", "tailnet-unlock", "alarm"]
-alarm_expires_node = false
+on_alarm = "alert"                     # or "expire"
+allow_recovery_delivery = false
 
 [hosts.web-1]
 node = "web-1"                         # the box's own tailnet node
@@ -708,7 +950,8 @@ uplink = "192.0.2.10"
 ### 12.5 Commands
 
 Box: `enroll`, `commit`, `status`, `verify [--next-boot]`, `reseal [--profile P] [--next-boot-only]`,
-`rotate`, `disable [--tailnet|--local-key|--console]`, `render-initramfs` (used by the hook).
+`rotate`, `disable [--tailnet|--local-key|--console]`, `door-keygen` and `seal` (the M1 building
+blocks `enroll` later calls), `render-initramfs` (used by the hook).
 
 Keyholder: `pins add <pins.toml>`, `unlock <host> [--recovery]`, `deliver <host>`, `watch`,
 `planned <host>`, `approver {ssh,tty,deny} ...`, `audit`.
@@ -717,34 +960,47 @@ Keyholder: `pins add <pins.toml>`, `unlock <host> [--recovery]`, `deliver <host>
 
 ### 13.1 Prerequisites
 
-Debian 13 with initramfs-tools, root on ZFS with native encryption, a TPM 2.0 visible as `/dev/tpmrm0`,
-Tailscale 1.86 or later (1.104.7 current) or a headscale server, a wired IPv4 uplink, room on `/boot`,
-and, before the last step, a keyholder with the root key in a key source.
+Debian 13 with initramfs-tools and the `contrib` component enabled (for `zfs-initramfs`), root on ZFS
+with native encryption, a TPM 2.0 visible as `/dev/tpmrm0` (a hard requirement; a virtual TPM only if
+its state does not travel with the machine's snapshots), Tailscale 1.86 or later or a headscale server,
+a wired IPv4 uplink, room on `/boot`, and, before the last step, a keyholder with the root key in a key
+source and a backup of the key that does not depend on the box.
 
 ### 13.2 An existing box (the main path)
 
 Every step leaves a box that boots:
 
 1. Install Tailscale and `tailnet-unlock`. Nothing changes at boot yet: no config, no door.
-2. Write `box.toml` and `authorized_keys` (`enroll --import-dropbear-initramfs` carries over the
-   authorized keys of an existing dropbear-initramfs setup; its host keys sat in plain text on `/boot`
-   and are not reused).
-3. `tailnet-unlock enroll --auth-key-file <file>`: checks the prerequisites; generates and seals the
-   door key; generates the recovery key; enrolls the unlock node with a second tailscaled
-   (`--encrypt-state`, userspace networking, its own socket and state) from a single-use, pre-authorized,
-   tagged, non-ephemeral auth key read from the file (`--auth-key=file:`), checks the state is sealed,
-   stops it; turns rehearsal on; rebuilds every initramfs and reads each back; prints `pins.toml`. The
-   auth key file is deleted. The box still boots with its local key.
+2. Write `box.toml`, `delivery_keys` and `operator_keys` (`enroll --import-dropbear-initramfs` carries
+   over the authorized keys of an existing dropbear-initramfs setup; its host keys sat in plain text on
+   `/boot` and are not reused).
+3. `tailnet-unlock enroll --auth-key-file <file>`: checks the prerequisites; generates (or imports)
+   and seals the door key; generates the recovery key if recovery is enabled; enrolls the unlock node
+   with a second tailscaled (`--encrypt-state`, userspace networking, its own socket and state) from a
+   single-use, pre-authorized, tagged, non-ephemeral auth key read from the file (`--auth-key=file:`),
+   checks the state is sealed, stops it; turns rehearsal on; rebuilds every initramfs and reads each
+   back; prints `pins.toml`. The auth key file is deleted. The box still boots with its local key.
 4. On the keyholder: `tailnet-unlock pins add pins.toml`, set the host's key source. If the box has a
    local key file, `tailnet-unlock enroll --rekey --sink <command>` can move to a fresh key, handing it
    to your secret store on stdin.
 5. Rehearsal reboot: the box waits up to `rehearsal.minutes` at its door; the keyholder runs
    `deliver web-1 --reason planned`. If the delivery works, the boot used it; if not, the local key boots
    the box when the time is up. `tailnet-unlock status` says which one unlocked this boot.
-6. `tailnet-unlock commit`: refuses unless this boot was unlocked through the door. Then sets
-   `keylocation=prompt`, deletes the local key file, rebuilds every initramfs, and checks that no image
-   holds the key and every image holds the door.
-7. Reboot. From now on the key lives only with the keyholder.
+6. `tailnet-unlock commit`: refuses unless this boot was unlocked through the sealed door. Then sets
+   `keylocation=prompt`, deletes the local key file, rebuilds every initramfs, and checks that no current
+   image holds the key and every image holds the door.
+7. Reboot. From now on the current key lives only with the keyholder.
+
+**What `commit` cannot undo.** While the key lived on the box, it was copied into every initramfs on
+`/boot` and into the root's own file. `commit` removes the current copies only. Older copies survive in
+ZFS snapshots of the dataset that held the key file, in backups of `/boot` or of the root, and in freed
+blocks on `/boot`'s file system and on disks replaced since. Anyone holding one of those, and a copy of
+the disks, can open them. `zfs change-key` (or `enroll --rekey`) gives the pool a new wrapping key, so
+an old key no longer opens the current pool on its own; but ZFS's master key, which encrypts the data,
+never changes without re-encrypting the data (send and receive into a new encryption root), so an old
+key together with an old disk copy still yields that master key. Treat the key-on-box era as exposed:
+rekey, destroy the snapshots and backups you can, and re-encrypt if the old copies may have left your
+hands.
 
 A box that prompts on the console today skips the local-key fallback: its rehearsal is the console.
 
@@ -756,43 +1012,44 @@ real hardware before the key leaves the box.
 For image builders: create the pool with `keylocation=prompt`, generate the key on the installer and
 put it in the key source, and run `tailnet-unlock enroll` in the target's chroot on the target machine
 (the TPM and the network must be the target's) with the `tpm` profile. `measured` can only be chosen
-after the first boot, since it seals to the chain that boots.
+after the first boot, since it seals to the chain that boots. A fresh install avoids the key-on-box era
+entirely.
 
 ### 13.4 Leaving
 
 `disable --local-key` reads the key on stdin, writes it to a key file, sets `keylocation` back and
 rebuilds every image without the door. `disable --console` keeps `prompt` and removes the door. Both
-print the unlock node's id to delete, or delete it with API access. `rotate` replaces the door key,
-the recovery key and the unlock node, and prints new pins; the old node is deleted, so an old `/boot`
-image stops working.
+print the unlock node's id to delete, or delete it with API access. After `disable`, the package can be
+removed. `rotate` replaces the door key, the recovery key and the unlock node, and prints new pins; the
+old node is deleted, so an old `/boot` image stops working.
 
 ## 14. Code
 
 - **POSIX sh in the initramfs** and in the initramfs-tools hook, because busybox's shell is all there
   is at boot. Kept small: network, unseal, starting and stopping two daemons, the door, the load-key
-  extension. Checked with `shellcheck --shell=sh` (POSIX as the target) and run under busybox's `sh` in
-  tests.
+  extension, the panic cleanup. Checked with `shellcheck --shell=sh` (POSIX as the target) and run under
+  busybox's `sh` in tests.
 - **Python everywhere else**: configuration, rendering, enrollment, sealing orchestration, the PCR
   predictor, the keyholder, approvers, the watcher. Python 3.13, the `python3` of Debian 13 (3.13.5),
-  with `tomllib` in the standard library; CI also runs the current upstream stable, 3.15.2. Standard
-  library only, so the keyholder ships as one file. TypeScript was the alternative: it would add a
-  Node runtime to every box and every keyholder for no gain here.
-- **Fully typed** (decision D14): every function, argument and return annotated; `mypy --strict` with
-  `disallow_any_explicit = true` and `warn_unused_ignores = true`; no `Any` escape hatches; a
-  `# type: ignore[code]` only with its reason on the same line, enforced by a check. Untrusted input
-  (configuration, approver output, door status, `tailscale status`) enters as `object` and is narrowed
-  by validating functions into `TypedDict`s or frozen dataclasses. Both run in pre-commit and in CI as
-  failing checks.
+  with `tomllib` in the standard library; tests run on the newest stable Python too (3.15.2 today).
+  Standard library only, so the keyholder ships as one file. TypeScript was the alternative: it would
+  add a Node runtime to every box and every keyholder for no gain here.
+- **Fully typed** (decision D14): every function, argument and return annotated; `mypy --strict
+  --python-version 3.13` with `disallow_any_explicit = true` and `warn_unused_ignores = true`; no
+  `Any` escape hatches; a `# type: ignore[code]` only with its reason on the same line, enforced by a
+  check. Untrusted input (configuration, approver output, door status, `tailscale status`) enters as
+  `object` and is narrowed by validating functions into `TypedDict`s or frozen dataclasses. All of it
+  runs in pre-commit and in CI as failing checks.
 - **Pure functions and explicit state**: no classes with behaviour; data is `TypedDict` or frozen
   dataclasses; decisions (policy shape, approval checks, watcher actions, prediction) are pure
   functions of their inputs, and effects (TPM, SSH, subprocesses, files) sit at the edge, so the
   decisions are unit-tested without a TPM or a network.
-- `ruff` for lint and formatting, `pytest` for tests.
+- `ruff` (target `py313`) for lint and formatting, `pytest` for tests.
 
 Planned layout:
 
 ```
-initramfs/        POSIX sh: lib/, door, hook, init-premount, init-bottom, zfs-load-key
+initramfs/        POSIX sh: lib/, door, hook, init-premount, init-bottom, panic, zfs-load-key
 src/tailnet_unlock/
                   config, render, seal, predict, enroll, door_client, deliver,
                   approvers/, watch, audit
@@ -806,66 +1063,91 @@ examples/         box.toml, keyholder.toml, policy.hujson, approver scripts
 
 ### 15.1 What runs where
 
-| Suite | Where | When |
-|---|---|---|
-| Lint: `ruff`, `mypy --strict` (as in section 14), the ignore-with-reason check, `shellcheck --shell=sh` | pre-commit locally; GitHub-hosted runners (the repository will be public, where they are free) | every commit and pull request, failing |
-| Unit: pytest on Python 3.13 and 3.15; busybox-sh tests of `initramfs/lib` | GitHub-hosted runners | every commit and pull request |
-| Packages: build in a Debian 13 container, `lintian`, install and purge | GitHub-hosted runners | every commit and pull request |
-| VM suite (15.2) against headscale | GitHub-hosted Linux runners, which expose `/dev/kvm`; or any Debian 13 host with KVM (`make vm-test`) | pull requests touching `initramfs/`, `src/` or `debian/`; full matrix nightly |
-| VM suite against a throwaway Tailscale tailnet | GitHub-hosted runners, with an OAuth client in the repository's secrets scoped to auth keys for a test tag | release tags and manual runs only, never for pull requests from forks |
-| Hardware smoke test | one machine with a discrete TPM, one with a firmware TPM | before each release, by hand, results in the release notes |
+| Run | Trigger | What | Where |
+|---|---|---|---|
+| Local | every commit | pre-commit: `shellcheck --shell=sh`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, unit tests; `make vm-test` for the VM scenarios | the developer's machine, a Debian host with KVM for the VM scenarios |
+| Check | every push and pull request | **one job**: `shellcheck --shell=sh` on `initramfs/`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, and the unit tests (busybox-sh tests included) on the newest stable Python | GitHub-hosted runner |
+| Weekly | a schedule, once a week | the full matrix: unit tests on Python 3.13 through the newest stable; package build, `lintian`, install and purge on Debian 13 and 14; the VM scenarios on Debian 13 and 14 against headscale; plus the next Python pre-release, allowed to fail | GitHub-hosted runners (Linux runners expose `/dev/kvm`) |
+| Release | a version tag | the full matrix and the VM scenarios on every supported Debian release (13 and 14), all required, plus the VM scenarios against a throwaway Tailscale tailnet (an OAuth client in the repository's secrets, scoped to auth keys for a test tag); then the release assets are built | GitHub-hosted runners |
+| Hardware | before each release, by hand | the scenarios that need real hardware on one machine with a discrete TPM and one with a firmware TPM; results in the release notes | the maintainer's machines |
+
+Every workflow job carries `if: ${{ !github.event.repository.private }}`, so nothing runs on hosted
+runners while the repository is private; until then the local runs are the checks. Secrets are never
+available to pull requests from forks. Debian 14 runs use initramfs-tools until the dracut module (M5).
 
 ### 15.2 The VM harness
 
-- QEMU (10.0.13 in Debian 13, 11.1.3 in trixie-backports) with OVMF (2025.02 in Debian 13, with and
-  without Secure Boot variables) and swtpm (0.10.2 upstream; 0.7.1 in Debian 13) as a TPM 2.0 per VM.
-  The harness records the versions it ran with. Plain QEMU rather than Incus keeps it the same on a
-  hosted runner and a laptop; Incus (6.0.4 LTS in trixie, 7.6.0 upstream) can run it locally through its
-  `tpm` device.
-- The guest: Debian 13.8 with root on ZFS (native encryption), built with mmdebstrap, cached by the hash
+- **Host side**: QEMU (10.0.13 in Debian 13, 11.1.3 in trixie-backports) with OVMF (2025.02 in
+  Debian 13, with and without Secure Boot variables) and swtpm (0.10.2 upstream; 0.7.1 in Debian 13)
+  as a TPM 2.0 per VM:
+  `swtpm socket --tpm2 --tpmstate dir=<vm>/tpm --ctrl type=unixio,path=<vm>/swtpm.sock` and
+  `-chardev socket,id=chrtpm,path=<vm>/swtpm.sock -tpmdev emulator,id=tpm0,chardev=chrtpm -device tpm-tis,tpmdev=tpm0`
+  on a `q35` machine, with `OVMF_CODE_4M.fd` and a per-VM copy of `OVMF_VARS_4M.fd`, a virtio disk and
+  a virtio-net NIC. The harness records the versions it ran with. Plain QEMU rather than Incus keeps it
+  the same on a hosted runner and a laptop; Incus (7.0, the active LTS line, 7.0.2 in trixie-backports;
+  6.0.4 in trixie) can run it locally through its `tpm` device.
+- **Serial console**: `-serial` to a socket the harness drives; the guest boots with
+  `console=ttyS0,115200`, served by the 8250 UART driver built into Debian's kernel. Every console
+  scenario (prompts, the fallback, the boot summary) goes through it.
+- **Guest layout**: GPT with a 512 MiB ESP (vfat), a 1 GiB `/boot` (ext4) and `rpool` on the rest:
+  `zpool create -o ashift=12 -O encryption=on -O keyformat=passphrase -O keylocation=prompt
+  -O compression=lz4 -O acltype=posixacl -O xattr=sa -O mountpoint=none rpool <disk>-part3`, the root
+  in `rpool/ROOT/debian` mounted at `/`, following the OpenZFS "Debian Root on ZFS" guide with `/boot` on
+  ext4 instead of a boot pool. The encryption root is `rpool`. Packages from trixie `main` and
+  `contrib`.
+- **Boot loader**: for `tpm`, GRUB for EFI (`grub-efi-amd64`) with Secure Boot off, reading `/boot`, the
+  common Debian layout. For `measured` (M6), systemd-boot with UKIs on a 1 GiB ESP, Secure Boot off and
+  on (our own keys enrolled in the VM's variables).
+- **Building the image**: inside a builder VM booted from Debian's official 13 cloud image, which
+  installs `zfs-dkms` and writes the target disk, so the CI host needs no ZFS module. Cached by the hash
   of its inputs, since building the ZFS module takes minutes.
-- Control plane: headscale 0.29.7 in a container on an isolated test network, with its embedded DERP,
-  so the suite needs no internet and no account.
-- The keyholder runs in the harness itself, with its own tailscaled in userspace networking.
-- Each scenario drives the VM's serial console, so the console fallback is tested the same way.
+- **Network**: M1 uses QEMU user networking with a forwarded port standing in for the uplink. From M2,
+  an isolated test network carries headscale 0.29.7 (in a container, with its embedded DERP), so the
+  suite needs no internet and no account.
+- **The keyholder** runs in the harness itself, from M2 with its own tailscaled in userspace networking.
 
 ### 15.3 Scenarios
 
 | # | Scenario | Passes when |
 |---|---|---|
-| T1 | Boot, unlock by hand over the tailnet door | the root mounts; the unlock node goes offline before the box's own node comes up |
-| T2 | Boot, the watcher finds it, the SSH approver approves | delivered; the audit line is complete |
+| T1 | Boot, unlock by hand through the door (M1: uplink; M2: tailnet) | the root mounts; the unlock node goes offline before the box's own node comes up |
+| T2 | Boot, the watcher finds it, the SSH approver approves | delivered; the audit line is complete, `by` names the key that logged in |
 | T3 | Approver refuses; approver times out | nothing is sent; the box keeps waiting; the console still works |
 | T4 | Control plane unreachable | the uplink door unlocks |
-| T5 | The disk image copied to a second VM with its own swtpm | no unlock node connects; the door key is not presented; only the recovery door answers; `deliver` refuses it |
-| T6 | A copy of `/boot` searched for secrets | no node key, machine key or door key in plain text (searched for the known test values) |
-| T7 | TPM cleared (swtpm state reset) | recovery door and console; `unlock --recovery` works; `enroll --replace` restores the door |
+| T5 | The disk image copied to a second VM with its own swtpm | no unlock node connects; the sealed key is not presented; only the recovery door answers, on the uplink only; `deliver` refuses it |
+| T6 | A copy of `/boot` searched for secrets | no node key, machine key or sealed door key in plain text (searched for the known test values); the recovery key is there, as documented |
+| T7 | TPM cleared (swtpm state reset) | `tpm`: recovery door on the uplink and the console; `unlock --recovery` works; `enroll --replace` restores the door |
 | T8 | Another system booted on the same VM and TPM | `tpm`: it can unseal the door key (the documented boundary); `measured`: it cannot |
-| T9 | A modified initramfs (`measured`) | the door key does not unseal; `deliver` refuses |
-| T10 | Kernel update and reboot (`measured`) | the predicted branch unseals; a forced misprediction lands on the recovery door, never a hang |
+| T9 | A modified initramfs, and an edited command line (`measured`) | the sealed key does not unseal; no recovery door (off by default); `panic()` reboots, no shell opens; `deliver` refuses |
+| T10 | Kernel update and reboot (`measured`) | the predicted branch unseals; a forced misprediction falls through as section 9 says, never a hang |
 | T11 | Tailscale package upgrade | every initramfs rebuilt by the trigger; `verify` reads the floor in each |
 | T12 | An approval for boot A replayed on boot B | refused (boot id) |
-| T13 | Unlock node online while the box runs | the alarm hook runs, once |
+| T13 | Unlock node online while the box runs | `on_alarm = "alert"`: the hook runs once; `"expire"`: the node's key is expired, the node is kept |
 | T14 | Every log, console capture, audit file and CI log | the key bytes appear nowhere |
 | T15 | `tailnet.enabled = false` | no Tailscale in any image; the uplink door alone |
 | T16 | Rehearsal and commit on a box with a local key | a failed delivery still boots with the local key; `commit` refuses until a door unlock happened |
-| T17 | `disable --local-key` | the box boots unattended again with no door |
-| T18 | LUKS backend (M7), dracut module (M5) | T1 to T17 again for each |
+| T17 | `disable --local-key`; removal before and after `disable` | the box boots unattended again with no door; `prerm` refuses removal while enrolled and allows it after |
+| T18 | A degraded build (tailscaled removed, then the door container removed) | the kernel package configures; the image keeps the uplink door, then the recovery door; `verify` exits non-zero; the door's `status` names the degradation |
+| T19 | Tailnet Lock on, enrollment with a signed auth key, the state directory in tmpfs only | the unlock node comes up and is reachable at every boot |
+| T20 | The example policy loaded into headscale | a peer that is neither keyholder nor operator cannot reach the door's port; the door reaches nothing; a keyholder reaches only the door's port |
+| T21 | `door.key_source = "import"` | the imported key is sealed, its pin matches the one known in advance, no plaintext copy remains on the box |
+| T22 | Door command grammar | anything but `status`, `unlock <uuid>` and, for operator keys, the empty command is refused; a raw key with a trailing newline and a passphrase with one are both handled as section 7.3 says |
+| T23 | LUKS backend (M7), dracut module (M5) | T1 to T22 again for each |
 
 ## 16. Milestones
 
 | Milestone | Delivers | Done when |
 |---|---|---|
-| M0 | This design | reviewed and the open questions answered |
-| M1 | The uplink door: initramfs-tools hook and scripts, the door command, the ZFS load-key extension, the sealed door key (`tpm`), the recovery door, the console path, `unlock` by hand; the VM harness | T1 (uplink), T3, T5 (uplink part), T6, T7, T14 pass |
-| M2 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests, the size measurement | T1, T4, T5, T6, T15 pass |
-| M3 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, audit, `watch`, the alarm | T2, T3, T12, T13, T14 pass |
-| M4 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the `.deb` packages, the zipapp; release 0.1 after the real-tailnet run and the hardware smoke test | T1 to T17 (`tpm`) pass on headscale and on a Tailscale tailnet |
-| M5 | The dracut module, for Debian 14 | T18 (dracut) |
+| M0 | This design | reviewed (section 19) |
+| M1 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, `unlock` by hand; the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T22 pass |
+| M2 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | T1, T4, T5, T6, T15, T19, T20 pass |
+| M3 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, audit, `watch`, `on_alarm` | T2, T3, T12, T13, T14 pass |
+| M4 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; release 0.1 after the release run and the hardware smoke test | T1 to T22 (`tpm`) pass on headscale and on a Tailscale tailnet |
+| M5 | The dracut module, for Debian 14 | T23 (dracut) |
 | M6 | The `measured` profile (systemd-boot and UKI) | T8, T9, T10 pass, Secure Boot on and off |
-| M7 | The LUKS backend | T18 (LUKS) |
+| M7 | The LUKS backend | T23 (LUKS) |
 
-M5 to M7 are independent of each other (order: open question O8).
+Order after 0.1: M5, then M6, then M7 (section 19).
 
 ## 17. Versions, read 2026-11-21
 
@@ -876,16 +1158,16 @@ M5 to M7 are independent of each other (order: open question O8).
 | Tailscale | 1.104.7 (released 2026-11-12); `--encrypt-state` on Linux since 1.86, opt-in again since 1.92.5 | `pkgs.tailscale.com/stable`, GitHub releases, Tailscale's secure node state storage page |
 | dropbear | 2026.94 upstream; 2025.89-1~deb13u1 in trixie (`dropbear-bin`) | GitHub `mkj/dropbear` releases; Debian madison |
 | tpm2-tools | 5.8 upstream; 5.7-1 in trixie | GitHub `tpm2-software/tpm2-tools` releases; Debian madison |
-| systemd | 262.2 upstream; 257.13-1~deb13u1 in trixie (also `systemd-boot`, `systemd-ukify`) | GitHub `systemd/systemd` releases; Debian madison |
-| OpenZFS | 2.4.4 upstream; 2.3.9 in trixie, 2.4.4 in trixie-backports | GitHub `openzfs/zfs` releases; Debian madison |
-| initramfs-tools | 0.148.4 in trixie; 0.151 in forky | Debian madison |
+| systemd | 262.2 upstream; 257.13-1~deb13u1 in trixie (also `systemd-boot`, `systemd-ukify`) | GitHub `systemd/systemd` releases; Debian madison; `man/experimental.xml` at v262.2 |
+| OpenZFS | 2.4.4 upstream; 2.3.9 in trixie `contrib`, 2.4.4 in trixie-backports `contrib` | GitHub `openzfs/zfs` releases; Debian madison |
+| initramfs-tools | 0.148.4 in trixie; 0.151 in forky | Debian madison; `init` and `scripts/functions` at 0.148.4 |
 | dracut | 106-6 in trixie; 112-8 in forky | Debian madison |
 | cryptsetup-initramfs | 2.7.5 in trixie | Debian madison |
 | Python | 3.13.5 in trixie; 3.15.2 upstream | Debian madison; endoflife.date |
 | swtpm | 0.10.2 upstream; 0.7.1 in trixie | GitHub `stefanberger/swtpm` releases; Debian madison |
 | QEMU | 10.0.13 in trixie; 11.1.3 in trixie-backports | Debian madison |
 | OVMF | 2025.02-8+deb13u1 in trixie | Debian madison |
-| Incus | 7.6.0 upstream; 6.0.4 in trixie | GitHub `lxc/incus` releases; Debian madison |
+| Incus | 7.0.2 (the active LTS line, 7.0), also in trixie-backports; 7.6.0 the newest feature release; 6.0.4 in trixie | GitHub `lxc/incus` releases; Debian madison |
 | headscale | 0.29.7 | GitHub `juanfont/headscale` releases |
 | mypy, ruff, pytest, pre-commit | 2.4.1, 0.17.6, 9.2.0, 4.7.0 | PyPI |
 | shellcheck | 0.11.0 upstream (0.10.0 in trixie) | GitHub `koalaman/shellcheck` releases |
@@ -901,40 +1183,48 @@ tools are pinned to the upstream versions above in pre-commit and CI.
 | D2 | Our own early-boot SSH server from `dropbear-bin`; Conflicts with `dropbear-initramfs` | The host key must be unsealed before the server starts; dropbear-initramfs starts its server with keys read from `/boot`. Two servers on one port would fight. |
 | D3 | tailscaled in userspace networking | No tun device, no firewall rules, nothing left in the kernel at handover; netstack hands inbound tailnet TCP to `127.0.0.1`. |
 | D4 | A persistent, tagged, separate unlock node | Ephemeral would need a fresh auth key at every boot, on `/boot`; separate keeps the box's grants out of the initramfs; tagged nodes do not expire by default. |
-| D5 | The tailnet carries the connection, a pinned SSH host key authenticates; no Tailscale SSH | A compromised peer or control plane can route traffic but cannot present the door key; Tailscale SSH would make the control plane the authenticator. |
-| D6 | Node state sealed by Tailscale's `--encrypt-state`; the door key sealed by tailnet-unlock | Tailscale's sealing is maintained upstream but has no PCR policy; the door key carries authentication, so it carries the measured policy. |
-| D7 | Two profiles, `tpm` by default and `measured` for systemd-boot with a UKI | `tpm` never needs a re-seal and never locks out; only `measured` stops an evil maid, and it needs prediction that only a UKI makes tractable. |
-| D8 | A transient primary from the standard SRK template; no persistent handles, no NV indices | Never collides with other users of the TPM, leaves nothing to clean up, same pattern as Tailscale. |
+| D5 | The tailnet carries the connection, a pinned SSH host key authenticates; no Tailscale SSH | A compromised peer or control plane can route traffic but cannot present the sealed key; Tailscale SSH would make the control plane the authenticator. |
+| D6 | Node state sealed by Tailscale's `--encrypt-state`; the door key sealed by tailnet-unlock | Tailscale's sealing is maintained upstream but has no PCR policy and no encrypted session; the door key carries authentication, so it carries the measured policy and the encrypted unseal. |
+| D7 | Two profiles, `tpm` by default and `measured` for systemd-boot with a UKI | `tpm` never needs a re-seal; only `measured` resists a modified boot chain, it needs prediction that only a UKI makes tractable, and it closes the gap only with recovery off. |
+| D8 | A transient primary from the TCG SRK template; no persistent handles, no NV indices | Never collides with other users of the TPM, leaves nothing to clean up. |
 | D9 | The root key is never on the box or in the TPM | A stolen machine never unlocks itself; losing the TPM loses the door, not the data. |
-| D10 | Deliveries only after an approval bound to one request, one boot and one door key; fail closed | A stolen machine runs the genuine door; approvals must not be replayable. |
+| D10 | Deliveries only after an approval bound to one request, one boot and one door key; fail closed | A stolen machine runs the genuine door; approvals must not be replayable. The keyholder enforces the binding; the door checks the boot id. |
 | D11 | Approver and key source are executables with a JSON contract | Any approval system or secret store plugs in without becoming a dependency, and is testable alone. |
 | D12 | The watcher reads the keyholder's own `tailscale status --json` | No API token, works with headscale, and shows the observed endpoint on a direct path. |
 | D13 | POSIX sh only in the initramfs, Python 3.13 elsewhere, standard library only | busybox has no Python; Debian 13's python3 is one dependency and has `tomllib`; TypeScript would need a Node runtime everywhere. |
 | D14 | Python fully typed: `mypy --strict`, `disallow_any_explicit`, ignores only with a reason, `TypedDict` or frozen dataclasses for data; initramfs shell under `shellcheck --shell=sh`; all failing checks in pre-commit and CI | Security code whose decisions are pure functions should be checked by machine, not by review alone. |
 | D15 | TOML configuration, validated by Python and rendered into each initramfs at build time | One source of truth; the keyholder's configuration is nested; a rendered copy can never go stale. |
-| D16 | Recovery door on by default, with its own unsealed key, never used by automation | A cleared TPM or a firmware update must not strand a headless box that has an uplink. |
+| D16 | Recovery door: `"uplink"` by default under `tpm`, `"off"` under `measured`, over the tailnet only when set; its key unsealed on `/boot`, said plainly | A cleared TPM must not strand a headless box with an uplink; under `measured` a recovery door would hand the key to a modified chain. |
 | D17 | The door on its own port, 2222 by default | Its host key never collides with the real sshd's in a known-hosts file. |
-| D18 | Fail the initramfs build when anything the door needs is missing or below the floor | An image is either complete or not written; initramfs-tools keeps the previous one. |
+| D18 | The hook never fails the build; each missing part degrades the image loudly (tailnet door, then sealed door, then any door), recorded and reported by `verify` | A kernel package's configure must not fail because of this project, and a degraded image must never go unnoticed. |
 | D19 | `.deb` packages plus a standard-library zipapp for keyholders | Debian boxes get dependencies and triggers; keyholders run anywhere Python runs. |
-| D20 | QEMU, OVMF and swtpm with headscale for every change; a throwaway Tailscale tailnet before releases | Reproducible without an account; the real control plane is still checked before anyone installs a release. |
-| D21 | The initramfs carries tailscaled only, not the CLI | Size; nothing at boot needs the CLI. |
-| D22 | Recommend a root key a person can type (`keyformat=passphrase`, at least 128 bits) | ZFS has one wrapping key per encryption root, so the console fallback types the same key. |
+| D20 | QEMU, OVMF and swtpm with headscale for the VM scenarios; a throwaway Tailscale tailnet before releases | Reproducible without an account; the real control plane is still checked before anyone installs a release. |
+| D21 | The initramfs carries tailscaled only, not the CLI | Size: the 1.104.7 CLI is 34.3 MB (16.7 MB at zstd level 9) per image, about 50 MB on `/boot` with three kernels. Nothing in the boot flow needs it: tailscaled starts from its saved preferences, the door's `status` does not report connection state, and keyholders read the node's state from their side. Attack surface is not the reason: the CLI is not a daemon. |
+| D22 | Recommend a root key a person can type (`keyformat=passphrase`, at least 128 bits), backed up off the box | ZFS has one wrapping key per encryption root, so the console fallback types the same key; losing it loses the data. |
+| D23 | Door key source `generate` or `import`, both sealed the same way | Consumers that already keep host keys in their own secret store can pin them in advance; the default keeps the plaintext from ever leaving the box. |
+| D24 | `on_alarm` is `alert` or `expire`, default `alert` | Expiring stops a cloned identity but strands a box behind NAT at its next genuine reboot; the safe generic default alerts, a consumer that prefers expiry sets it. |
+| D25 | Automated delivery refuses the recovery door unless `allow_recovery_delivery = true` and the approver acknowledges the recovery role | The recovery key is on `/boot` in plain text; sending to it must be a separate, explicit human decision. |
+| D26 | Door material wiped on every exit path; no initramfs shell under `measured` (`panic=10` in the UKI command line) | A shell inside a genuine initramfs, after the unseal, would hand out the sealed key; under `measured` that is the attack the profile exists to stop. |
+| D27 | Separate delivery keys (`restrict`) and operator keys (`no-port-forwarding,no-agent-forwarding,no-X11-forwarding`); the role set by the key line | People need a terminal for the no-echo prompt; automation needs nothing, so it gets nothing. |
+| D28 | CI: one check job on every push and pull request; the full matrix weekly; releases gated by the full matrix and the VM scenarios on Debian 13 and 14; no hosted job while the repository is private | Fast feedback for each change, the expensive runs where they matter, and nothing spent before the project is public. |
+| D29 | `prerm` refuses removal while the box is enrolled | Removing the hooks would leave the next initramfs without a door. |
+| D30 | TPM 2.0 is a hard requirement; no mode without it | Without a TPM the door's identity is plain text on `/boot`, which is the problem this project exists to fix. |
 
-## 19. Open questions
+## 19. Review outcomes
 
-Each has a recommendation and what follows from it. The design above assumes the recommendation.
+The first review (2026-11-21) settled the open questions of the first draft:
 
-| # | Question | Recommendation | Consequence |
-|---|---|---|---|
-| O1 | Who predicts PCRs in `measured`: a narrow predictor of our own, or systemd-pcrlock? | Decide when M6 starts: systemd-pcrlock if its manual page no longer calls it experimental (it does in 262), else our own predictor for PCR 4 in the UKI path only. | Our own: more security code to maintain, but small and fully tested. pcrlock: less code, an interface that may still change, and an NV index on the TPM. |
-| O2 | Support GRUB in `measured`? | No. GRUB users get `tpm`. | Evil-maid protection requires moving the box to systemd-boot with a UKI. |
-| O3 | Recovery door on by default? | Yes, uplink and tailnet, with a distinct key and manual delivery only. | A holder of a `/boot` copy who is on the box's network path can present the recovery door; only the warning and the operator stand in the way. Off: a cleared TPM means a console visit. |
-| O4 | On alarm, also expire the unlock node's key? | Alert only by default; expiry as an option. | Expiring stops a cloned identity at once, and also removes the tailnet door at the next genuine reboot until a re-enrollment, which strands a box behind NAT. |
-| O5 | Ship an approver that says yes on its own (planned reboot, expected site)? | No, not in 0.x. Consumers who want it write it against the contract. | Every unlock needs a person unless the consumer automates it, which is the safe default for a public tool. |
-| O6 | Seal the node state under the `measured` policy too (our own encryption instead of `--encrypt-state`)? | No. | A modified boot chain on the same machine can still join the tailnet as the unlock node; it reaches nothing and cannot present the door key. Doing it ourselves would mean owning Tailscale's state encryption. |
-| O7 | Distribution: release assets only, or a signed apt repository? | Release assets with checksums for 0.x; an apt repository once there are users who ask. | Updates are manual until then. |
-| O8 | Order of M5 (dracut), M6 (measured), M7 (LUKS) | M5 first, since forky's kernel already prefers dracut; then M6; then M7. | Evil-maid protection waits for the dracut module. |
-| O9 | Default door port | 2222. | Users whose firewall allows only 22 must open it or choose 22 and use a known-hosts alias. |
+| # | Question | Outcome |
+|---|---|---|
+| O1 | Who predicts PCRs under `measured` | Decided when M6 starts: systemd-pcrlock if it is no longer marked experimental, otherwise our own predictor for PCR 4 in the UKI path only. |
+| O2 | GRUB under `measured` | Not supported; GRUB users get `tpm`. Evil-maid resistance needs systemd-boot with a UKI. |
+| O3 | Recovery door default | `"uplink"` under `tpm`, `"off"` under `measured`, over the tailnet only when set (D16), automated delivery gated (D25). |
+| O4 | Expire on alarm | A setting, `on_alarm`, default `alert` (D24). |
+| O5 | An approver that says yes by itself | Not shipped. |
+| O6 | Node state under the `measured` policy | No: Tailscale's own sealing stays; the boundary is written in section 6.2. |
+| O7 | Distribution | Release assets with checksums for 0.x; an apt repository later. |
+| O8 | Order of M5 to M7 | M5 (dracut), then M6 (`measured`), then M7 (LUKS). |
+| O9 | Default door port | 2222. |
 
 ## 20. Prior art
 
@@ -946,4 +1236,4 @@ Each has a recommendation and what follows from it. The design above assumes the
 - Tailscale's secure node state storage (`--encrypt-state`): the sealing this design reuses for the
   node state.
 - systemd's measured boot tools (`systemd-measure`, `systemd-pcrlock`, signed PCR policies): the model
-  for `measured`, and possibly its implementation (O1).
+  for `measured`, and possibly its implementation.
