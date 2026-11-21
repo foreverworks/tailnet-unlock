@@ -1,7 +1,9 @@
 # tailnet-unlock: design
 
-Status: design, reviewed and re-reviewed (section 19). Nothing described here is built yet. Versions were read at
-their sources on 2026-11-21 (section 17); the build re-reads them when it starts.
+Status: design, reviewed and re-reviewed (section 19). Milestone M1's building blocks are built and
+tested in a Debian 13 container, including one real boot under QEMU TCG; the VM scenarios that need
+KVM are written and not yet run (section 16). Versions were read at their sources on 2026-11-21
+(section 17).
 
 ## 1. Summary
 
@@ -292,10 +294,10 @@ package) into the image.
    # /usr/lib/tailnet-unlock/door <delivery|operator>   (the role is set by authorized_keys)
    role=$1
    h='[0123456789abcdef]'
+   # shellcheck disable=SC2254 # $h is unquoted on purpose: each one is a bracket expression
    case "${SSH_ORIGINAL_COMMAND-}" in
    status)
        door_status ;;
-   # shellcheck disable=SC2254 # $h is unquoted on purpose: each one is a bracket expression
    "unlock "$h$h$h$h$h$h$h$h-$h$h$h$h-$h$h$h$h-$h$h$h$h-$h$h$h$h$h$h$h$h$h$h$h$h)
        door_unlock "${SSH_ORIGINAL_COMMAND#unlock }" ;;
    '')
@@ -310,7 +312,10 @@ package) into the image.
    expression listing the sixteen lowercase hex digits (a list, not a range, so no locale can widen
    it), so the second branch matches exactly `unlock ` followed by the 36-character shape of
    `/proc/sys/kernel/random/boot_id`. shellcheck warns about unquoted expansions in a pattern
-   (SC2254), which is what this line wants, so the warning is disabled on that line alone.
+   (SC2254), which is what this pattern wants, so the warning is disabled with its reason. The
+   directive sits in front of the `case` statement, because shellcheck accepts directives only in
+   front of complete commands, not in front of one branch (SC1124, checked with shellcheck 0.10.0);
+   no other branch expands anything in its pattern.
    `door_refuse` prints its result line and exits, so a delivery key that sends the empty command
    never falls through to `door_prompt`.
    - `status`: prints one JSON line (sealed or recovery key, boot id, profile, seal result, recorded
@@ -327,8 +332,15 @@ package) into the image.
      A `raw` key cannot be typed; the prompt says so.
    - **The key on the wire** is the key's bytes with no framing and no trailing newline. The keyholder
      strips exactly one trailing newline from a key source's output for `passphrase` and `hex` keys,
-     and for `raw` keys sends exactly 32 bytes or refuses. Whether libzfs tolerates a stray newline is
-     tested in M1, not assumed.
+     refuses any other line break in them, and for `raw` keys sends exactly 32 bytes or refuses. What
+     libzfs does, read in OpenZFS 2.3.9 (`lib/libzfs/libzfs_crypto.c`, `get_key_material_raw`, used
+     for `-L prompt` when stdin is not a terminal): a `passphrase` or `hex` key is the first line read
+     with `getline`, with one trailing newline trimmed, so a stray newline is tolerated and anything
+     after the first line is silently ignored; a `raw` key is read as up to 33 bytes and
+     `validate_key` refuses anything but 32 ("Raw key too long"), so a raw key with a trailing newline
+     does not load. The door passes the bytes through unchanged (at most 512). The M1 tests check the
+     door against a stand-in that follows this source; the KVM scenario T22 checks it against the real
+     module.
 5. The root mounts. **init-bottom/tailnet-unlock** sends TERM to the supervisor, which stops tailscaled
    with SIGTERM (so the control plane sees the unlock node go offline at once) and waits up to 10
    seconds before SIGKILL, stops dropbear by its PID, deletes the door material and exits. If the
@@ -582,8 +594,17 @@ tpm2_policyor -Q -S s.ctx -l sha256:branch.1.digest,branch.2.digest   # two or m
 # both:
 tpm2_sessionconfig -Q s.ctx --enable-encrypt
 tpm2_unseal -Q -c door.ctx -p session:s.ctx -o /tailnet-unlock/run/door_key
-tpm2_flushcontext s.ctx; tpm2_flushcontext door.ctx; tpm2_flushcontext primary.ctx
+tpm2_flushcontext -Q s.ctx; tpm2_flushcontext -Q -t
 ```
+
+Checked against tpm2-tools 5.7 in M1: every option above exists under these names, `tpm2_create -i -`
+reads the sealed data on stdin (so the plaintext never needs a file of its own), and the TPM refuses
+129 bytes of sealed data and takes 128 (an ed25519 dropbear key is 83). `tpm2_flushcontext` takes a
+session's context file, but it refuses a saved object context ("Argument neither a session nor a
+transient"), so objects are flushed with `-t`, and after every step that loads one: each tool loads
+the saved contexts again, and a TPM without a resource manager (swtpm in the tests) runs out of
+object slots otherwise. Through `/dev/tpmrm0` the kernel's resource manager shows each connection
+only its own objects, so `-t` never reaches another user's and changes nothing there.
 
 A `resets` branch is tried in a fresh session (`tpm2_policycountertimer --eq resets=<n>` instead of
 `tpm2_policypcr`) when the PCR branch fails. This protects the door key only: Tailscale's unseal of the
@@ -1136,18 +1157,29 @@ old node is deleted, so an old `/boot` image stops working.
   decisions are unit-tested without a TPM or a network.
 - `ruff` (target `py313`) for lint and formatting, `pytest` for tests.
 
-Planned layout:
+Layout (what M1 built, then what later milestones add):
 
 ```
-initramfs/        POSIX sh: lib/, door, hook, init-premount, init-bottom, panic, zfs-load-key
+initramfs/        POSIX sh: door, supervise, unseal, lib.sh, paths.sh (fixed paths), hook,
+                  init-premount, init-bottom, panic, zfs-load-key, post-update, conf-umask
 src/tailnet_unlock/
-                  config, render, seal, predict, enroll, door_client, deliver,
+                  config, render, authorized_keys, doorkey, tpm, container, seal, cli;
+                  keyholder/: pins (the role from the verified key), approval (the contract),
+                  keymaterial, doorstatus. Later: predict, enroll, door_client, deliver,
                   approvers/, watch, audit
-debian/           packaging
-tests/unit/       pytest, busybox-sh tests of initramfs/lib
-tests/vm/         the VM harness and its scenarios
-examples/         box.toml, keyholder.toml, policy.hujson, approver scripts
+tools/            install-tree (puts the files where the package will), check_ignores.py
+tests/unit/       pytest: the pure functions, the harness's command lines
+tests/shell/      the door, the panic script and the load-key extension under dash and busybox
+tests/tpm/        door-keygen, seal and unseal against swtpm; the supervisor with dropbear
+tests/initramfs/  real images from mkinitramfs, the degraded builds, the door run from an image
+tests/vm/         the harness, one TCG boot, the KVM scenarios and the guest's provisioning
+tests/container/  the Debian 13 test image (packages from Debian itself)
+examples/         box.toml; later keyholder.toml, policy.hujson, approver scripts
+debian/           packaging (M4)
 ```
+
+`make test` runs every tier but the KVM one in the test container, with one command; `make lint
+unit` is what CI's check job runs.
 
 ## 15. Test plan
 
@@ -1155,9 +1187,9 @@ examples/         box.toml, keyholder.toml, policy.hujson, approver scripts
 
 | Run | Trigger | What | Where |
 |---|---|---|---|
-| Local | every commit | pre-commit: `shellcheck --shell=sh`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, unit tests; `make vm-test` for the VM scenarios | the developer's machine, a Debian host with KVM for the VM scenarios |
+| Local | every commit | `make test`: in the Debian 13 test container, `shellcheck --shell=sh`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, the unit and shell tests, swtpm and dropbear, real images, one TCG boot; `make vm-test` for the KVM scenarios | the developer's machine with docker; a Debian host with KVM for the VM scenarios |
 | Check | every push and pull request | **one job**: `shellcheck --shell=sh` on `initramfs/`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, and the unit tests (busybox-sh tests included) on the newest stable Python | GitHub-hosted runner |
-| Weekly | a schedule, once a week | the full matrix: unit tests on Python 3.13 through the newest stable; package build, `lintian`, install and purge on Debian 13 and 14; the VM scenarios on Debian 13 and 14 against headscale; plus the next Python pre-release, allowed to fail | GitHub-hosted runners (Linux runners expose `/dev/kvm`) |
+| Weekly | a schedule, once a week | the full matrix: unit tests on Python 3.13 through the newest stable; the container tiers of `make test` on Debian 13 and 14; from M4, package build, `lintian`, install and purge on Debian 13 and 14; the VM scenarios on Debian 13 and 14 against headscale; plus the next Python pre-release, allowed to fail | GitHub-hosted runners (Linux runners expose `/dev/kvm`) |
 | Release | a version tag | the full matrix and the VM scenarios on every supported Debian release (13 and 14), all required, plus the VM scenarios against a throwaway Tailscale tailnet (an OAuth client in the repository's secrets, scoped to auth keys for a test tag); then the release assets are built | GitHub-hosted runners |
 | Hardware | before each release, by hand | the scenarios that need real hardware on one machine with a discrete TPM and one with a firmware TPM; results in the release notes | the maintainer's machines |
 
@@ -1191,6 +1223,12 @@ available to pull requests from forks. Debian 14 runs use initramfs-tools until 
 - **Building the image**: inside a builder VM booted from Debian's official 13 cloud image, which
   installs `zfs-dkms` and writes the target disk, so the CI host needs no ZFS module. Cached by the hash
   of its inputs, since building the ZFS module takes minutes.
+- **Without KVM**: `make tcg` boots Debian's kernel with an image built in the test container under
+  TCG, on SeaBIOS, with swtpm on `tpm-tis`, a virtio NIC matched by MAC and no disk: the unseal from
+  the VM's own TPM, the uplink, the sealed door's `status`, and the panic script wiping the door
+  before the shell when initramfs-tools gives up waiting for the root. It takes about a minute. Do
+  not pass `rootdelay=` there: initramfs-tools 0.148.4 sleeps that long before init-premount even
+  starts.
 - **Network**: M1 uses QEMU user networking with a forwarded port standing in for the uplink. From M2,
   an isolated test network carries headscale 0.29.7 (in a container, with its embedded DERP), so the
   suite needs no internet and no account.
@@ -1234,7 +1272,7 @@ available to pull requests from forks. Debian 14 runs use initramfs-tools until 
 | Milestone | Delivers | Done when |
 |---|---|---|
 | M0 | This design | reviewed (section 19) |
-| M1 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, `unlock` by hand; the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 pass |
+| M1 | The uplink door (built, KVM scenarios pending; below): a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, `unlock` by hand; the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 pass |
 | M2 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) pass |
 | M3 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, the role from the verified key, audit, `watch`, `on_alarm` | T2, T3, T12, T13, T14, T24, T25 pass |
 | M4 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; release 0.1 after the release run and the hardware smoke test | T1 to T22 and T24 to T28 (`tpm`) pass on headscale and on a Tailscale tailnet |
@@ -1243,6 +1281,17 @@ available to pull requests from forks. Debian 14 runs use initramfs-tools until 
 | M7 | The LUKS backend | T23 (LUKS) |
 
 Order after 0.1: M5, then M6, then M7 (section 19).
+
+**Where M1 stands.** Built and passing in the Debian 13 test container: `door-keygen` and `seal`
+(`generate` and `import`, the recovery key's import), the container, the unseal, the door and its
+grammar under dash and busybox, the supervisor with its restarts, the panic script on both branches,
+the load-key extension with the console prompt and the rehearsal limit, the hook with every
+degradation, the boot scripts, and one real boot under TCG (section 15.2). The process-level and
+TCG tests cover the door halves of T1, T5, T7, T21, T22, T26, T27 and T28. What remains for M1 is
+the KVM run of `tests/vm/test_scenarios.py` (T1, T3, T5, T6, T7, T14, T21, T22, T27, T28 against a
+ZFS root), which needs a host with `/dev/kvm`, QEMU, OVMF (`OVMF_CODE_4M.fd`, `OVMF_VARS_4M.fd`),
+swtpm, about 20 GB of disk for the cached images, and access to cloud.debian.org and
+deb.debian.org for the first build; and T16's local-key half, which needs `enroll` (M4).
 
 ## 17. Versions, read 2026-11-21
 
@@ -1332,6 +1381,16 @@ A security re-review (2026-11-21) found five gaps, fixed in this revision before
 | R3 | The recovery acknowledgement was not in the enforced list, and the recovery key's import had no flag | Refused without it (10.2 step 4, 10.3; T24); `--recovery-key-file -`, and the recovery key is never sealed (8.1; T21) |
 | R4 | A dropbear or tailscaled that dies while the box waits stayed dead | A supervisor restarts both with a backoff (7.3 step 2; D32; T26), and a wrong key is shown not to be an exit (T27) |
 | R5 | A full `/boot`, or a failing Tailscale trigger, could fail a package | The hook degrades to the uplink door (`boot-space`), and the trigger always exits 0 (7.2, 12.1; T18) |
+
+### Open questions from M1
+
+| # | Question | Recommendation |
+|---|---|---|
+| Q1 | A `raw` root key at the operator prompt: the door answers `bad-command` after saying the key cannot be typed | Keep the five results; a sixth (`cannot-type`) adds a code no keyholder acts on |
+| Q2 | Objects are flushed with `tpm2_flushcontext -t`, safe only through a resource manager | Keep, and have `enroll` refuse any TCTI but `device:/dev/tpmrm0` on a box |
+| Q3 | The plaintext door key is deleted once dropbear has loaded it, which relies on dropbear 2025.89 not reading the file again; a restart unseals again | Keep; the supervisor test fails if a dropbear upgrade starts reading the file per connection |
+| Q4 | The panic script keys `noshell` off the rendered profile or `tailnet-unlock.noshell`; under `measured` the UKI must carry the word | Keep both, and have M6's `verify` check the word is in every UKI's embedded command line |
+| Q5 | The weekly and release jobs use `ubuntu-latest` with nested KVM for the VM scenarios | Keep while the repository is public and hosted runners are free; revisit if runs flake |
 
 ## 20. Prior art
 

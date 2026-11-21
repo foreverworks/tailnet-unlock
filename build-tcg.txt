@@ -1,0 +1,38 @@
+E                                                                        [100%]
+==================================== ERRORS ====================================
+___________ ERROR at setup of test_door_comes_up_and_panic_wipes_it ____________
+
+tmp_path_factory = TempPathFactory(_given_basetemp=PosixPath('/src/build/tcg'), _trace=<pluggy._tracing.TagTracerSub object at 0x7f52108ae780>, _basetemp=None, _retention_count=3, _retention_policy='all')
+
+    @pytest.fixture(scope="module")
+    def booted(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[Installed, Path]]:
+>       work = tmp_path_factory.mktemp("tcg")
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+tests/vm/test_tcg_smoke.py:44: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/opt/dev/lib/python3.13/site-packages/_pytest/tmpdir.py:138: in mktemp
+    basename = self._ensure_relative_to_basetemp(basename)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/opt/dev/lib/python3.13/site-packages/_pytest/tmpdir.py:118: in _ensure_relative_to_basetemp
+    if (self.getbasetemp() / basename).resolve().parent != self.getbasetemp():
+        ^^^^^^^^^^^^^^^^^^
+/opt/dev/lib/python3.13/site-packages/_pytest/tmpdir.py:198: in getbasetemp
+    basetemp.mkdir(mode=0o700)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = PosixPath('/src/build/tcg'), mode = 448, parents = False
+exist_ok = False
+
+    def mkdir(self, mode=0o777, parents=False, exist_ok=False):
+        """
+        Create a new directory at this given path.
+        """
+        try:
+>           os.mkdir(self, mode)
+E           FileNotFoundError: [Errno 2] No such file or directory: '/src/build/tcg'
+
+/usr/lib/python3.13/pathlib/_local.py:724: FileNotFoundError
+=========================== short test summary info ============================
+ERROR tests/vm/test_tcg_smoke.py::test_door_comes_up_and_panic_wipes_it - Fil...
+1 error in 0.05s

@@ -8,9 +8,11 @@ behind a home router with no public address. The door's identity is to be sealed
 so that a copied disk cannot pretend to be your box. The key is to come from you, or from a machine you
 trust after an approval you control.
 
-> **Status: design, not yet usable.** This repository holds the design ([DESIGN.md](DESIGN.md)) and
-> nothing you can install yet. Everything below describes what is planned. Read it, question it, open
-> an issue. The first release will cover Debian 13 with an encrypted ZFS root.
+> **Status: early, not yet usable.** This repository holds the design ([DESIGN.md](DESIGN.md)) and
+> its first building blocks (sealing the door's key to the TPM, the door itself, the initramfs hook
+> and boot scripts) with their tests, but nothing you can install yet. Everything below describes
+> what is planned. Read it, question it, open an issue. The first release will cover Debian 13 with
+> an encrypted ZFS root.
 
 **Three words used throughout:**
 

@@ -1,0 +1,31 @@
+# A version tag: the full matrix and the VM scenarios gate a draft release with the source archive
+# and its checksum. The .deb packages and the keyholder zipapp join the assets in M4.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  full:
+    if: ${{ !github.event.repository.private }}
+    uses: ./.github/workflows/full.yml
+
+  release:
+    if: ${{ !github.event.repository.private }}
+    needs: full
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          name="tailnet-unlock-${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="$name/" -o "$name.tar.gz" "$GITHUB_SHA"
+          sha256sum "$name.tar.gz" >SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag tailnet-unlock-*.tar.gz SHA256SUMS
