@@ -152,7 +152,7 @@ def test_container_round_trip(tmp_path: Path) -> None:
 
 
 def test_container_refuses_measured_for_now(tmp_path: Path) -> None:
-    with pytest.raises(DoorKeyError, match="M6"):
+    with pytest.raises(DoorKeyError, match="built so far"):
         write_container(
             tmp_path / "door.tpm",
             Container(profile="measured", public=b"", private=b"", pin=DOOR_PIN),

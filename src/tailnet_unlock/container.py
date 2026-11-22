@@ -33,7 +33,7 @@ def _write(path: Path, data: bytes) -> None:
 
 def write_container(final: Path, container: Container, replace: bool) -> None:
     if container.profile != "tpm":
-        raise DoorKeyError("only the tpm profile is built in this release (measured is M6)")
+        raise DoorKeyError("only the tpm profile is built so far")
     if final.exists() and not replace:
         raise DoorKeyError(f"{final} exists; pass --replace to make a new door key")
     staging = final.with_name(f".{final.name}.new.{os.getpid()}")

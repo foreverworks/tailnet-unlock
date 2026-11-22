@@ -2,7 +2,7 @@
 # DESIGN.md section 12.3 explains each one.
 
 [root]
-backend = "zfs"              # "zfs"; "luks" from M7
+backend = "zfs"              # "zfs"; "luks" is planned
 
 [door]
 port = 2222

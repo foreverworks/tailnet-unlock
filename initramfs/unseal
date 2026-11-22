@@ -21,7 +21,7 @@ profile=''
 read -r format 2>/dev/null <"$container/format" || exit 2
 read -r profile 2>/dev/null <"$container/profile" || exit 2
 [ "$format" = "tailnet-unlock door 1" ] || exit 2
-# measured containers are milestone M6; this image opens the tpm profile only
+# measured containers are not built yet; this image opens the tpm profile only
 [ "$profile" = tpm ] || exit 2
 [ -r "$container/public" ] && [ -r "$container/private" ] || exit 2
 

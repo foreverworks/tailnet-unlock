@@ -46,6 +46,9 @@ def test_static_network() -> None:
     [
         ("", "network"),
         ('[network]\ninterface = "eno1; rm -rf /"\n', "network.interface"),
+        ('[network]\ninterface = "eno1:1"\n', "network.interface"),
+        ('[network]\ninterface = "eno1\\n"\n', "network.interface"),
+        ('[network]\ninterface = "a234567890123456"\n', "network.interface"),
         (MINIMAL + "[door]\nport = 0\n", "door.port"),
         (MINIMAL + '[door]\nport = "2222"\n', "door.port"),
         (MINIMAL + "[door]\nport = true\n", "door.port"),

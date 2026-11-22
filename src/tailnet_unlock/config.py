@@ -37,7 +37,7 @@ KEY_SOURCES: tuple[KeySource, ...] = ("generate", "import")
 NETWORK_MODES: tuple[NetworkMode, ...] = ("dhcp", "static")
 MATCHES: tuple[Match, ...] = ("name", "mac")
 
-_INTERFACE = re.compile(r"[A-Za-z0-9_.:-]{1,15}")
+_INTERFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
 _DNS_LABEL = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
 _TAG = re.compile(r"tag:[a-z0-9]([a-z0-9-]{0,62})")
 
@@ -196,7 +196,7 @@ def _network(value: object) -> NetworkConfig:
     )
     if not _INTERFACE.fullmatch(interface):
         raise ConfigError(
-            "network.interface: required, a Linux interface name (1 to 15 of A-Z a-z 0-9 _ . : -)"
+            "network.interface: required, a Linux interface name (1 to 15 of A-Z a-z 0-9 _ . -)"
         )
     match = one_of(
         get_str(table, "match", "name", "network", ConfigError),

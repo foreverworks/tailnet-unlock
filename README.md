@@ -202,8 +202,7 @@ approvers that ask a person. If you want unattended unlocks for planned reboots,
 yourself, against a small contract, and you own the risk.
 
 **Does it work with headscale?** It is designed to. The test plan is to run its virtual machine
-scenarios against headscale every week and before every release, once those scenarios exist and the
-project is public.
+scenarios against headscale every week and before every release, once those scenarios exist.
 
 **I use dropbear-initramfs today.** tailnet-unlock replaces it (two SSH servers cannot share early
 boot). `enroll` is planned to carry over your authorized keys. Your old host keys are not reused,

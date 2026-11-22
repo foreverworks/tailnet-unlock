@@ -160,7 +160,7 @@ tu_hook() {
 		# shellcheck disable=SC1091 # rendered at build time, in a temporary directory
 		. "$work/tailnet-unlock.conf"
 		if [ "${TU_PROFILE-}" = measured ]; then
-			degrade measured-unsupported "the measured profile is not built yet (M6); the" \
+			degrade measured-unsupported "the measured profile is not built yet; the" \
 				"sealed door is left out"
 		elif copy_container; then
 			door=sealed
