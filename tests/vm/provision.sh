@@ -15,7 +15,7 @@ apt-get update
 # headers for the kernel that is running (the cloud image boots a -cloud-amd64 kernel), so dkms
 # builds the module `modprobe zfs` needs
 apt-get install -y --no-install-recommends "linux-headers-$(uname -r)" zfs-dkms zfsutils-linux \
-	debootstrap gdisk dosfstools e2fsprogs
+	debootstrap gdisk parted dosfstools e2fsprogs
 modprobe zfs
 
 disk=/dev/vdb
