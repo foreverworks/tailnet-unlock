@@ -97,6 +97,18 @@ def inputs_hash() -> str:
     return digest.hexdigest()[:16]
 
 
+def expect_unless_exited(vm: Vm, pattern: str, timeout: float) -> re.Match[str]:
+    """`expect`, but a VM that powered off without printing the marker fails at once."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return expect(vm.console, pattern, 10)
+        except TimeoutError:
+            if vm.qemu.poll() is not None:
+                break
+    return expect(vm.console, pattern, 10)
+
+
 def build_guest() -> Guest:
     cache = CACHE / inputs_hash()
     done = cache / "guest.json"
@@ -187,7 +199,7 @@ def build_guest() -> Guest:
         # provision.sh's first trace line: the seed was read and the script started
         expect(vm.console, r"\+ seed=/run/tailnet-unlock-seed", 300)
         # the log is tailed to the console; a failed run ends with `TU-PROVISION rc=<n>`
-        outcome = expect(vm.console, r"TU-PROVISION (done|rc=\d+)", 3600)
+        outcome = expect_unless_exited(vm, r"TU-PROVISION (done|rc=\d+)", 3600)
         assert outcome.group(1) == "done", f"the builder's provision.sh failed: {outcome.group(0)}"
         vm.qemu.wait(timeout=300)
     finally:

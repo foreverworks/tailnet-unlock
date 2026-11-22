@@ -141,6 +141,7 @@ if zpool list rpool >/dev/null 2>&1; then
 	zpool export -f rpool
 fi
 echo "TU-PROVISION done"
+echo "TU-PROVISION done" >/dev/ttyS0 || :
 # the log is tailed to the console: give the tail time to print the line before the power goes
 sleep 5
 poweroff
