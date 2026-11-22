@@ -110,7 +110,15 @@ update-initramfs -u -k all
 EOF
 for d in dev proc sys run; do umount -R -l "/mnt/$d"; done
 umount /mnt/boot/efi /mnt/boot
-zpool export rpool
+cd /
+sync
+# what may still hold the pool: the lazy unmounts finish, then force it if a holder remains
+ls -l /proc/[0-9]*/cwd /proc/[0-9]*/root 2>/dev/null | grep ' /mnt' || :
+for _ in 1 2 3 4 5; do
+	zpool export rpool && break
+	sleep 3
+done
+zpool list rpool >/dev/null 2>&1 && zpool export -f rpool
 echo "TU-PROVISION done"
 # the log is tailed to the console: give the tail time to print the line before the power goes
 sleep 5
