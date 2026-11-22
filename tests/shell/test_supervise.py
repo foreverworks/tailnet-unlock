@@ -222,6 +222,30 @@ def test_the_uplink_address_and_device_come_from_the_net_conf(
     assert (box.run / "uplink_device").read_text().strip() == "eth9"
 
 
+UNUSABLE_ADDRESSES = [
+    "0.0.0.0",  # noqa: S104 # the address that must be refused, never bound
+    "999.1.1.1",
+    "1.2.3.4.5",
+    "1.2.3",
+    "010.0.2.7",
+    "224.0.0.1",
+    "255.255.255.255",
+]
+
+
+@pytest.mark.parametrize("address", UNUSABLE_ADDRESSES)
+def test_an_address_no_host_should_listen_on_counts_as_absent(
+    tmp_path: Path,
+    shell: Shell,
+    running: list[tuple[subprocess.Popen[bytes], Sandbox]],
+    address: str,
+) -> None:
+    box = net_conf_box(tmp_path, f"DEVICE='eth9'\nIPV4ADDR='{address}'\n")
+    process = start_supervisor(box, shell)
+    running.append((process, box))
+    assert uplink_line(box) == "eth9 without an address"
+
+
 HOSTILE_NET_CONFS = {
     "substitution": "DEVICE='$(touch @ROOT@/pwned)'\nIPV4ADDR='$(touch @ROOT@/pwned)'\n",
     "semicolons": "DEVICE='x'; touch @ROOT@/pwned\nIPV4ADDR='192.0.2.7'; touch @ROOT@/pwned\n",

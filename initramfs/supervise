@@ -92,6 +92,26 @@ net_conf_value() {
 	sed -n -e "s/^$2='\($3\)'\$/\1/p" -e "s/^$2=\($3\)\$/\1/p" "$1" | sed -n 1p
 }
 
+# usable_address <dotted>: four decimal octets of 0 to 255 without leading zeros, and a unicast
+# address a host can listen on: not 0.0.0.0/8 (which would make dropbear listen on every interface),
+# multicast or broadcast.
+usable_address() {
+	rest=$1.
+	count=0
+	first=''
+	while [ -n "$rest" ]; do
+		octet=${rest%%.*}
+		rest=${rest#*.}
+		case $octet in
+		'' | *[!0-9]* | 0?* | ????*) return 1 ;;
+		esac
+		[ "$octet" -le 255 ] || return 1
+		count=$((count + 1))
+		[ -n "$first" ] || first=$octet
+	done
+	[ "$count" -eq 4 ] && [ "$first" -ge 1 ] && [ "$first" -le 223 ]
+}
+
 bring_up_uplink() {
 	# configure_networking and its helpers come from initramfs-tools
 	# shellcheck disable=SC1090 # initramfs-tools' scripts/functions, at boot only
@@ -104,6 +124,7 @@ bring_up_uplink() {
 	for conf in "$TU_NET_CONF_DIR/net-${DEVICE-}.conf" "$TU_NET_CONF_DIR"/net-*.conf; do
 		[ -r "$conf" ] || continue
 		uplink_address=$(net_conf_value "$conf" IPV4ADDR "$ADDRESS_PATTERN")
+		usable_address "$uplink_address" || uplink_address=''
 		uplink_device=$(net_conf_value "$conf" DEVICE "$DEVICE_PATTERN")
 		# a device the conf does not name (or names in a shape nothing uses) is the one
 		# configure_networking reported
