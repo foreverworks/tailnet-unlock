@@ -26,7 +26,12 @@ RECOVERY_KEY = "recovery_host_key"
 
 
 def seal_door_key(
-    blob: bytes, final: Path, work_parent: Path, tcti: str | None, replace: bool
+    blob: bytes,
+    final: Path,
+    work_parent: Path,
+    tcti: str | None,
+    replace: bool,
+    allow_swap: bool = False,
 ) -> str:
     """Seal one dropbear ed25519 key into the container at `final`; return its pin."""
     public_key = check_dropbear_ed25519(blob)
@@ -34,7 +39,7 @@ def seal_door_key(
         raise DoorKeyError(
             f"the key is {len(blob)} bytes; the TPM seals at most {MAX_SEALED_BYTES}"
         )
-    work = private_workdir(work_parent)
+    work = private_workdir(work_parent, allow_swap)
     try:
         public, private = work / "public", work / "private"
         run_sequence(seal_sequence(work, public, private), tpm_environment(tcti), {2: blob})
@@ -51,8 +56,8 @@ def seal_door_key(
     return pin
 
 
-def make_key(work_parent: Path, imported: bytes | None) -> bytes:
-    work = private_workdir(work_parent)
+def make_key(work_parent: Path, imported: bytes | None, allow_swap: bool = False) -> bytes:
+    work = private_workdir(work_parent, allow_swap)
     try:
         return generate_key(work) if imported is None else import_key(imported, work)
     finally:
@@ -60,18 +65,27 @@ def make_key(work_parent: Path, imported: bytes | None) -> bytes:
 
 
 def door_keygen(
-    state_dir: Path, work_parent: Path, imported: bytes | None, tcti: str | None, replace: bool
+    state_dir: Path,
+    work_parent: Path,
+    imported: bytes | None,
+    tcti: str | None,
+    replace: bool,
+    allow_swap: bool = False,
 ) -> str:
     """Generate (or import) the door key, seal it into `state_dir/door.tpm`, return its pin."""
-    blob = make_key(work_parent, imported)
-    return seal_door_key(blob, state_dir / DOOR_CONTAINER, work_parent, tcti, replace)
+    blob = make_key(work_parent, imported, allow_swap)
+    return seal_door_key(blob, state_dir / DOOR_CONTAINER, work_parent, tcti, replace, allow_swap)
 
 
 def recovery_keygen(
-    state_dir: Path, work_parent: Path, imported: bytes | None, replace: bool
+    state_dir: Path,
+    work_parent: Path,
+    imported: bytes | None,
+    replace: bool,
+    allow_swap: bool = False,
 ) -> str:
     """Generate (or import) the recovery key, stored unsealed (0600); return its pin."""
-    blob = make_key(work_parent, imported)
+    blob = make_key(work_parent, imported, allow_swap)
     pin = pin_line(check_dropbear_ed25519(blob))
     final = state_dir / RECOVERY_KEY
     if final.exists() and not replace:

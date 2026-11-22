@@ -493,9 +493,12 @@ takes the equivalent `acls` rules, and the VM suite checks the same rules live a
 
 **Where the door key comes from** (decision D23): `door.key_source = "generate"` (the default) makes it
 on the box with `dropbearkey -t ed25519` in a tmpfs, seals it, and deletes the plaintext; the pin is
-printed afterwards. Every command that makes or converts a plaintext key refuses while any swap area
-is active (`/proc/swaps`): a tmpfs page, like the memory of the process holding the key, can be
-written to swap. The tool says so and asks for `swapoff -a` for the time it takes. (The other
+printed afterwards. Every command that makes or converts a plaintext key refuses while a swap area that can
+reach a disk is active (`/proc/swaps`): a tmpfs page, like the memory of the process holding the key,
+can be written to swap. A zram device is RAM and does not count. The tool says so and asks for
+`swapoff -a` for the time it takes, or, for a box where that is unsafe, `--allow-swap`: it prints a
+warning and ends its output with a comment line saying the key was made with swap active, which
+`enroll` keeps with the pins and in the box's state. (The other
 option, piping the key from `dropbearkey` straight into `tpm2_create`, would avoid the file but not
 the key in memory, and would not cover an imported key; the refusal covers every path.) `"import"` takes a key the consumer provisions from its own secret store
 (`tailnet-unlock enroll --door-key-file -` reads an ed25519 private key in OpenSSH or dropbear format on

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from keys import ALICE, KEYHOLDER
-from tailnet_unlock.cli import MAX_STDIN, _read_input, main
+from tailnet_unlock.cli import MAX_STDIN, _read_input, main, parser
 
 
 def write_config(directory: Path, box: str) -> None:
@@ -56,3 +56,9 @@ def test_a_small_file_input_is_read_whole(tmp_path: Path) -> None:
     small = tmp_path / "key"
     small.write_bytes(b"abc")
     assert _read_input(str(small)) == b"abc"
+
+
+def test_allow_swap_is_an_opt_in_on_the_key_commands() -> None:
+    assert parser().parse_args(["door-keygen"]).allow_swap is False
+    assert parser().parse_args(["door-keygen", "--allow-swap"]).allow_swap is True
+    assert parser().parse_args(["seal", "--container", "x", "--allow-swap"]).allow_swap is True

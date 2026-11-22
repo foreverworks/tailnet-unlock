@@ -9,12 +9,14 @@ from tailnet_unlock import doorkey
 from tailnet_unlock.container import Container, read_container, write_container
 from tailnet_unlock.doorkey import (
     check_dropbear_ed25519,
+    disk_swap_devices,
     ed25519_public_key,
     fingerprint,
     mount_fstype,
     pin_line,
     private_workdir,
     remove_tree,
+    require_no_swap,
     swap_devices,
 )
 from tailnet_unlock.errors import DoorKeyError
@@ -70,6 +72,27 @@ def test_swap_devices_reads_proc_swaps() -> None:
     assert swap_devices(header) == []
     assert swap_devices(header + "/dev/zram0 partition 1024 0 100\n") == ["/dev/zram0"]
     assert swap_devices("") == []
+
+
+def test_zram_is_ram_and_is_not_swap_to_a_disk() -> None:
+    header = "Filename Type Size Used Priority\n"
+    both = header + "/dev/zram0 partition 1024 0 100\n/dev/vda4 partition 2048 0 -2\n"
+    assert disk_swap_devices(both) == ["/dev/vda4"]
+    assert disk_swap_devices(header + "/dev/zram0 partition 1024 0 100\n") == []
+
+
+def test_allow_swap_warns_and_reports_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    swaps = tmp_path / "swaps"
+    swaps.write_text("Filename Type Size Used Priority\n/dev/vda4 partition 2048 0 -2\n")
+    monkeypatch.setattr(doorkey, "PROC_SWAPS", swaps)
+    with pytest.raises(DoorKeyError, match="--allow-swap"):
+        require_no_swap()
+    assert require_no_swap(allow_swap=True) is True
+    assert "warning: swap is active (/dev/vda4)" in capsys.readouterr().err
+    swaps.write_text("Filename Type Size Used Priority\n/dev/zram0 partition 1024 0 100\n")
+    assert require_no_swap() is False
 
 
 def test_no_plaintext_key_is_made_while_swap_is_active(

@@ -243,9 +243,24 @@ def test_panic_with_a_damaged_file_wipes_reboots_and_never_returns(
         process.wait()
 
 
-def test_panic_without_a_door_returns_quietly(tmp_path: Path, shell: Shell) -> None:
+def no_door_box(tmp_path: Path, how: str) -> Sandbox:
+    """An image without a door: no paths.sh, no lib.sh, no run directory (the hook copies none)."""
     box = make_sandbox(tmp_path)
     box.run.rmdir()
+    (box.lib / "paths.sh").unlink()
+    (box.lib / "lib.sh").unlink()
+    if how == "no configuration":
+        box.conf.unlink()
+    else:
+        box.conf.write_text("TU_PROFILE='tpm'\nTU_DOOR='none'\n")
+    return box
+
+
+@pytest.mark.parametrize("how", ["no configuration", "TU_DOOR none"])
+def test_panic_without_a_door_returns_and_opens_the_shell(
+    tmp_path: Path, shell: Shell, how: str
+) -> None:
+    box = no_door_box(tmp_path, how)
     script = copy_script(box, "panic")
     completed = subprocess.run(
         [*shell.argv, str(script)],
@@ -255,6 +270,28 @@ def test_panic_without_a_door_returns_quietly(tmp_path: Path, shell: Shell) -> N
         check=False,
     )
     assert completed.returncode == 0
+    assert not (box.root / "reboots").exists()
+
+
+@pytest.mark.parametrize("how", ["no configuration", "TU_DOOR none", "measured profile"])
+def test_panic_without_a_door_still_honours_noshell(tmp_path: Path, shell: Shell, how: str) -> None:
+    box = no_door_box(tmp_path, how)
+    if how == "measured profile":
+        box.conf.write_text("TU_PROFILE='measured'\nTU_DOOR='none'\n")
+    else:
+        box.cmdline.write_text("BOOT_IMAGE=/vmlinuz ro tailnet-unlock.noshell quiet\n")
+    shell = Shell(shell.name, shell.argv, f"{box.bin}:{shell.path}")
+    process = start_panic(box, shell)
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and not (box.root / "reboots").exists():
+            time.sleep(0.2)
+        assert (box.root / "reboots").read_text().startswith("reboot -f")
+        time.sleep(1)
+        assert process.poll() is None, "the panic script returned, so panic() would open a shell"
+    finally:
+        process.kill()
+        process.wait()
 
 
 def run_extension(
@@ -354,8 +391,10 @@ def test_console_prompt_asks_again_after_a_wrong_key(tmp_path: Path, shell: Shel
     try:
         read_until(controller, b"Key for rpool")
         os.write(controller, b"wrong horse battery\n")
-        read_until(controller, b"did not load")
-        read_until(controller, b"Key for rpool")
+        seen = read_until(controller, b"did not load")
+        # the next prompt may arrive in the same read as the refusal
+        if b"Key for rpool" not in seen.split(b"did not load", 1)[1]:
+            read_until(controller, b"Key for rpool")
         os.write(controller, b"correct horse battery\n")
         assert extension_rc(box, process) == "rc=0"
         assert (box.run / "unlocked_by").read_text().strip() == "console"

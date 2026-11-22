@@ -12,6 +12,7 @@ import base64
 import hashlib
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from tailnet_unlock.errors import DoorKeyError, ToolError
@@ -121,18 +122,35 @@ def swap_devices(swaps: str) -> list[str]:
     return [line.split()[0] for line in swaps.splitlines()[1:] if line.split()]
 
 
-def require_no_swap() -> None:
+def disk_swap_devices(swaps: str) -> list[str]:
+    """The swap areas that can reach a disk: every one but a zram device, which is RAM."""
+    return [device for device in swap_devices(swaps) if not device.startswith("/dev/zram")]
+
+
+def require_no_swap(allow_swap: bool = False) -> bool:
     """Plaintext keys are only ever written to RAM that cannot be swapped out.
 
     A tmpfs page can be written to swap, and so can the memory holding a key this process read,
-    so with any swap area active no plaintext key is made at all.
+    so with a swap area that reaches a disk active no plaintext key is made. `allow_swap` (the
+    operator's `--allow-swap`, for a box where `swapoff -a` is unsafe) turns the refusal into a
+    warning on stderr. Returns whether such swap was active, so the caller can record it.
     """
-    active = swap_devices(PROC_SWAPS.read_text(encoding="utf-8"))
-    if active:
+    active = disk_swap_devices(PROC_SWAPS.read_text(encoding="utf-8"))
+    if not active:
+        return False
+    listed = ", ".join(active[:3])
+    if not allow_swap:
         raise DoorKeyError(
-            f"swap is active ({', '.join(active[:3])}): plaintext key material could be written "
-            "to disk. Run `swapoff -a` (and keep swap off) while keys are made"
+            f"swap is active ({listed}): plaintext key material could be written to disk. "
+            "Run `swapoff -a` (and keep swap off) while keys are made, or pass --allow-swap "
+            "if that is unsafe on this box"
         )
+    print(
+        f"tailnet-unlock: warning: swap is active ({listed}); --allow-swap lets plaintext key "
+        "material reach disk",
+        file=sys.stderr,
+    )
+    return True
 
 
 def require_tmpfs(path: Path) -> None:
@@ -143,8 +161,8 @@ def require_tmpfs(path: Path) -> None:
         raise DoorKeyError(f"{path}: the work directory must be on a tmpfs, not {fstype}")
 
 
-def private_workdir(parent: Path) -> Path:
-    require_no_swap()
+def private_workdir(parent: Path, allow_swap: bool = False) -> Path:
+    require_no_swap(allow_swap)
     require_tmpfs(parent)
     work = parent / f"tailnet-unlock.{os.getpid()}.{os.urandom(6).hex()}"
     work.mkdir(mode=0o700)

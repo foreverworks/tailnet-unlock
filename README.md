@@ -22,7 +22,7 @@ trust after an approval you control.
 - **TPM**: a chip (or a firmware function) on the motherboard that can encrypt small secrets so that
   only this one machine can decrypt them.
 
-**Two things to know before you read on:**
+**Three things to know before you read on:**
 
 - **You need a TPM 2.0.** It is a hard requirement. Most rented servers expose none, and many virtual
   machines either have none or have a virtual TPM whose state is copied along with the machine's
@@ -30,6 +30,11 @@ trust after an approval you control.
 - **There is no hands-off mode.** Every unlock is a decision: you type the key, or an approver you
   configure says yes for that one boot. If you need a box that always boots by itself, this is not the
   tool.
+- **Turn swap off while the door's keys are made.** A key made on the box exists in plain form for a
+  moment, in memory, and memory can be written to a swap disk. The key tools refuse to run while a
+  swap area on a disk is active (zram is RAM and does not count): run `swapoff -a` first. If that is
+  unsafe on your box, `--allow-swap` makes the keys anyway, prints a warning, and the output says it
+  was used, so the choice stays visible.
 
 ## Who this is for
 

@@ -31,6 +31,10 @@ STATE_DIR = Path("/var/lib/tailnet-unlock/door")
 WORK_DIR = Path("/run/tailnet-unlock")
 CONFIG_DIR = Path("/etc/tailnet-unlock")
 MAX_STDIN = 16384
+SWAP_HELP = (
+    "make keys even though swap (other than zram) is active, where `swapoff -a` is unsafe; "
+    "the plaintext key may reach the disk, and the output says so"
+)
 
 
 def _read_input(name: str) -> bytes:
@@ -38,6 +42,12 @@ def _read_input(name: str) -> bytes:
         return sys.stdin.buffer.read(MAX_STDIN + 1)
     with Path(name).open("rb") as handle:
         return handle.read(MAX_STDIN + 1)
+
+
+def _print_swap_note(allow_swap: bool) -> None:
+    """The record that --allow-swap was used: it is in the output enroll keeps with the pins."""
+    if allow_swap:
+        print("# made with --allow-swap: plaintext key material may have reached a swap device")
 
 
 def _work_parent(argument: str | None) -> Path:
@@ -53,20 +63,22 @@ def _cmd_door_keygen(args: argparse.Namespace) -> int:
     imported = None if args.import_file is None else _read_input(args.import_file)
     work = _work_parent(args.work_dir)
     if args.recovery:
-        pin = recovery_keygen(state_dir, work, imported, args.replace)
+        pin = recovery_keygen(state_dir, work, imported, args.replace, args.allow_swap)
         print(f'recovery_key = "{pin}"  # {fingerprint(pin)}, stored unsealed by design')
     else:
-        pin = door_keygen(state_dir, work, imported, args.tcti, args.replace)
+        pin = door_keygen(state_dir, work, imported, args.tcti, args.replace, args.allow_swap)
         print(f'door_key = "{pin}"  # {fingerprint(pin)}, sealed to this TPM')
+    _print_swap_note(args.allow_swap)
     return 0
 
 
 def _cmd_seal(args: argparse.Namespace) -> int:
     imported = _read_input("-")
     work = _work_parent(args.work_dir)
-    blob = make_key(work, imported)
-    pin = seal_door_key(blob, Path(args.container), work, args.tcti, args.replace)
+    blob = make_key(work, imported, args.allow_swap)
+    pin = seal_door_key(blob, Path(args.container), work, args.tcti, args.replace, args.allow_swap)
     print(f'door_key = "{pin}"  # {fingerprint(pin)}, sealed to this TPM')
+    _print_swap_note(args.allow_swap)
     return 0
 
 
@@ -151,6 +163,7 @@ def parser() -> argparse.ArgumentParser:
         "--tcti", help="the TPM transport (default $TPM2TOOLS_TCTI, then device:/dev/tpmrm0)"
     )
     keygen.add_argument("--replace", action="store_true")
+    keygen.add_argument("--allow-swap", action="store_true", help=SWAP_HELP)
     keygen.set_defaults(handler=_cmd_door_keygen)
 
     seal = commands.add_parser("seal", help="seal a private key read on stdin into a container")
@@ -158,6 +171,7 @@ def parser() -> argparse.ArgumentParser:
     seal.add_argument("--work-dir")
     seal.add_argument("--tcti")
     seal.add_argument("--replace", action="store_true")
+    seal.add_argument("--allow-swap", action="store_true", help=SWAP_HELP)
     seal.set_defaults(handler=_cmd_seal)
 
     render = commands.add_parser(

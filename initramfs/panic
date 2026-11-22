@@ -5,9 +5,10 @@
 #   tpm:      stop the supervisor, wipe, return; panic() opens its shell for the console.
 #   measured: wipe, then reboot and never return, so panic() never reaches its shell.
 # It fails closed: the signals are ignored from the first statement, whether the shell stays shut
-# is decided from /proc/cmdline before anything is sourced, and a shared file that will not source
-# (missing, damaged) counts as noshell, so a broken image wipes and reboots instead of opening a
-# shell beside the door.
+# is decided from /proc/cmdline before anything is sourced, and in an image that carries a door a
+# shared file that will not source (missing, damaged) counts as noshell, so a broken image wipes
+# and reboots instead of opening a shell beside the door. An image without a door (no
+# configuration, or TU_DOOR='none') has nothing to wipe and gets the shell, unless noshell is set.
 trap '' INT QUIT TSTP HUP TERM
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
@@ -27,38 +28,46 @@ case " $words " in
 *" tailnet-unlock.noshell "* | *" tailnet-unlock.noshell=1 "*) noshell=1 ;;
 esac
 
-# Each shared file is tried in a subshell first: a file that fails to source ends only that
-# subshell, never this script (a failed `.` ends a non-interactive shell).
-# shellcheck source=paths.sh
-if ( . /usr/lib/tailnet-unlock/paths.sh ) 2>/dev/null; then
-	. /usr/lib/tailnet-unlock/paths.sh
-	run_dir=$TU_RUN
-else
-	sane=0
-fi
-if [ "$sane" = 1 ]; then
-	# shellcheck source=lib.sh
-	if ( . "$TU_LIB/lib.sh" ) 2>/dev/null; then
-		. "$TU_LIB/lib.sh"
-	else
-		sane=0
-	fi
-fi
-# no configuration at all is an image without a door; one that exists but will not source is not
-if [ "$sane" = 1 ] && [ -e "$TU_CONF" ]; then
-	# shellcheck source=/dev/null
-	if ( . "$TU_CONF" ) 2>/dev/null; then
-		. "$TU_CONF"
-	else
-		sane=0
-	fi
-fi
-if [ "$sane" = 1 ]; then
-	if [ "$noshell" = 0 ] && tu_noshell; then
-		noshell=1
-	fi
+# Does this image claim a door? The configuration says so. None at all, or `TU_DOOR='none'` (a
+# package without a box.toml, a degraded build), is an image without a door: there is nothing to
+# wipe and paths.sh and lib.sh were never copied, so their absence is no sign of damage. A
+# configuration that exists but will not source is damaged, and shuts the shell.
+claims_door=1
+conf=/conf/tailnet-unlock.conf
+# shellcheck source=/dev/null
+if [ ! -e "$conf" ]; then
+	claims_door=0
+elif info=$( ( . "$conf" && printf '%s %s' "${TU_DOOR-none}" "${TU_PROFILE-}" ) 2>/dev/null ); then
+	case "$info" in
+	none*) claims_door=0 ;;
+	esac
+	case "$info" in
+	*" measured") noshell=1 ;;
+	esac
 else
 	noshell=1
+fi
+
+# For an image with a door, each shared file is tried in a subshell first: a file that fails to
+# source ends only that subshell, never this script (a failed `.` ends a non-interactive shell),
+# and a damaged image means noshell, not a shell beside the door.
+if [ "$claims_door" = 1 ]; then
+	# shellcheck source=paths.sh
+	if ( . /usr/lib/tailnet-unlock/paths.sh ) 2>/dev/null; then
+		. /usr/lib/tailnet-unlock/paths.sh
+		run_dir=$TU_RUN
+	else
+		sane=0
+	fi
+	if [ "$sane" = 1 ]; then
+		# shellcheck source=lib.sh
+		if ( . "$TU_LIB/lib.sh" ) 2>/dev/null; then
+			. "$TU_LIB/lib.sh"
+		else
+			sane=0
+		fi
+	fi
+	[ "$sane" = 1 ] || noshell=1
 fi
 
 # The wipe when lib.sh cannot be trusted: kill what the state files name and delete the state
@@ -77,12 +86,14 @@ panic_wipe_unaided() {
 }
 
 if [ "$noshell" = 1 ]; then
-	if [ "$sane" = 1 ]; then
+	if [ "$claims_door" = 0 ]; then
+		:
+	elif [ "$sane" = 1 ]; then
 		[ -d "$TU_RUN" ] && tu_stop_supervisor 5
 	else
 		panic_wipe_unaided
 	fi
-	printf 'tailnet-unlock: the boot failed; the door is stopped and wiped. No shell under the measured profile: rebooting in %s seconds\n' \
+	printf 'tailnet-unlock: the boot failed; nothing of the door is left. No shell under the measured profile: rebooting in %s seconds\n' \
 		"${TU_PANIC_DELAY:-10}" 2>/dev/null >"${TU_CONSOLE:-/dev/console}"
 	sleep "${TU_PANIC_DELAY:-10}"
 	"${TU_REBOOT:-reboot}" -f
@@ -92,6 +103,7 @@ if [ "$noshell" = 1 ]; then
 	done
 fi
 
+[ "$claims_door" = 1 ] || exit 0
 [ -d "$TU_RUN" ] || exit 0
 tu_stop_supervisor 15
 tu_log "the door is stopped and wiped before the shell opens; the console prompt remains"
