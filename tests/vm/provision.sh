@@ -12,7 +12,9 @@ mount -o ro /dev/disk/by-label/CIDATA "$seed" 2>/dev/null || mount -o ro LABEL=C
 export DEBIAN_FRONTEND=noninteractive
 sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources
 apt-get update
-apt-get install -y --no-install-recommends linux-headers-amd64 zfs-dkms zfsutils-linux \
+# headers for the kernel that is running (the cloud image boots a -cloud-amd64 kernel), so dkms
+# builds the module `modprobe zfs` needs
+apt-get install -y --no-install-recommends "linux-headers-$(uname -r)" zfs-dkms zfsutils-linux \
 	debootstrap gdisk dosfstools e2fsprogs
 modprobe zfs
 
