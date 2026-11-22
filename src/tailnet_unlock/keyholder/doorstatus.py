@@ -12,6 +12,7 @@ from tailnet_unlock.errors import ContractError
 from tailnet_unlock.keyholder.keymaterial import KeyFormat, key_format
 
 STATUS_SCHEMA = "tailnet-unlock.door-status/1"
+MAX_STATUS_BYTES = 4096
 _BOOT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 _TOKEN = re.compile(r"[A-Za-z0-9 _.:/@+=?-]{0,255}")
 
@@ -58,6 +59,8 @@ def _count(value: object, name: str) -> int:
 
 
 def parse_door_status(line: bytes) -> DoorStatus:
+    if len(line) > MAX_STATUS_BYTES:
+        raise ContractError("door status: longer than a status line can be")
     try:
         value: object = json.loads(line.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:

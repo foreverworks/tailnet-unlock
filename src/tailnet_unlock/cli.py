@@ -36,7 +36,8 @@ MAX_STDIN = 16384
 def _read_input(name: str) -> bytes:
     if name == "-":
         return sys.stdin.buffer.read(MAX_STDIN + 1)
-    return Path(name).read_bytes()[: MAX_STDIN + 1]
+    with Path(name).open("rb") as handle:
+        return handle.read(MAX_STDIN + 1)
 
 
 def _work_parent(argument: str | None) -> Path:

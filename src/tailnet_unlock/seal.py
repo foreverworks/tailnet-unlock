@@ -16,6 +16,7 @@ from tailnet_unlock.doorkey import (
     pin_line,
     private_workdir,
     remove_tree,
+    wipe_file,
 )
 from tailnet_unlock.errors import DoorKeyError
 from tailnet_unlock.tpm import MAX_SEALED_BYTES, run_sequence, seal_sequence, tpm_environment
@@ -75,15 +76,32 @@ def recovery_keygen(
     final = state_dir / RECOVERY_KEY
     if final.exists() and not replace:
         raise DoorKeyError(f"{final} exists; pass --replace to make a new recovery key")
+    remove_stale_staging(state_dir)
     staging = final.with_name(f".{RECOVERY_KEY}.new.{os.getpid()}")
-    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(blob)
-        handle.flush()
-        os.fsync(handle.fileno())
     public = final.with_name(RECOVERY_KEY + ".pub")
     public_staging = final.with_name(f".{RECOVERY_KEY}.pub.new.{os.getpid()}")
-    public_staging.write_text(pin + "\n", encoding="ascii")
-    staging.rename(final)
-    public_staging.rename(public)
+    try:
+        fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(blob)
+            handle.flush()
+            os.fsync(handle.fileno())
+        public_staging.write_text(pin + "\n", encoding="ascii")
+        staging.rename(final)
+        public_staging.rename(public)
+    finally:
+        # a failure part way (a full disk, a signal) leaves no plaintext key behind
+        for leftover in (staging, public_staging):
+            if leftover.exists():
+                wipe_file(leftover)
     return pin
+
+
+def remove_stale_staging(state_dir: Path) -> None:
+    """Overwrite and delete what an earlier, interrupted run left of the recovery key."""
+    for pattern in (f".{RECOVERY_KEY}.new.*", f".{RECOVERY_KEY}.pub.new.*"):
+        for stale in state_dir.glob(pattern):
+            if stale.is_file() and not stale.is_symlink():
+                wipe_file(stale)
+            else:
+                stale.unlink()

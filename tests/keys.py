@@ -2,13 +2,13 @@
 
 import base64
 
-from tailnet_unlock.doorkey import pin_line
+from tailnet_unlock.doorkey import ed25519_public_key, pin_line
 
 
 def dropbear_ed25519(seed_byte: int) -> bytes:
-    """A dropbear-format ed25519 private key blob with a recognisable, fake seed and public half."""
+    """A dropbear-format ed25519 private key: a recognisable, fake seed and its real public half."""
     seed = bytes([seed_byte]) * 32
-    public = bytes([seed_byte ^ 0xFF]) * 32
+    public = ed25519_public_key(seed)
     return (
         len(b"ssh-ed25519").to_bytes(4, "big")
         + b"ssh-ed25519"

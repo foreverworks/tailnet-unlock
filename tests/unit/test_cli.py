@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from keys import ALICE, KEYHOLDER
-from tailnet_unlock.cli import main
+from tailnet_unlock.cli import MAX_STDIN, _read_input, main
 
 
 def write_config(directory: Path, box: str) -> None:
@@ -45,3 +45,14 @@ def test_render_refuses_a_door_nobody_can_log_in_to(tmp_path: Path) -> None:
     assert (
         main(["render-initramfs", "--config-dir", str(config), "--out", str(tmp_path / "out")]) == 2
     )
+
+
+def test_a_file_input_is_capped_while_it_is_read() -> None:
+    # /dev/zero never ends: reading it whole first, then cutting, would never return
+    assert len(_read_input("/dev/zero")) == MAX_STDIN + 1
+
+
+def test_a_small_file_input_is_read_whole(tmp_path: Path) -> None:
+    small = tmp_path / "key"
+    small.write_bytes(b"abc")
+    assert _read_input(str(small)) == b"abc"

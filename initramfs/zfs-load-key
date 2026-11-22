@@ -21,7 +21,7 @@ tu_console_prompt() {
 		printf '\n'
 		if printf '%s' "$tu_key" | "$TU_ZFS" load-key -L prompt "$tu_root" >/dev/null 2>&1; then
 			tu_key=''
-			tu_put unlocked_by console
+			tu_put unlocked_by console || tu_log "cannot record that the console unlocked this boot"
 			return 0
 		fi
 		tu_key=''
@@ -46,17 +46,22 @@ tu_load_key() {
 	case "${KEYLOCATION-}" in
 	file://*)
 		if [ -r "${KEYLOCATION#file://}" ] && [ -z "${TU_REHEARSAL_MINUTES-}" ]; then
-			tu_put unlocked_by local
+			tu_put unlocked_by local || tu_log "cannot record that the local key unlocks this boot"
 			return 1
 		fi
 		;;
 	esac
 
-	tu_put keyformat "$("$TU_ZFS" get -H -o value keyformat "$tu_root" 2>/dev/null)"
-	tu_put waiting_for "$tu_root"
+	# the door tells a keyholder what to deliver from these two files; when they cannot be written
+	# (a full tmpfs) the door cannot unlock, and the console prompt below still can
+	tu_keyformat=$("$TU_ZFS" get -H -o value keyformat "$tu_root" 2>/dev/null)
+	tu_put keyformat "$tu_keyformat" || :
+	tu_put waiting_for "$tu_root" ||
+		tu_log "cannot record the encryption root for the door (is its state directory full?);" \
+			"only the console prompt can unlock this boot"
 
 	tu_prompt=''
-	if [ "$(tu_get keyformat)" = raw ]; then
+	if [ "$tu_keyformat" = raw ]; then
 		tu_log "the root key is raw bytes and cannot be typed; waiting for the door"
 	else
 		tu_console_prompt "$tu_root" &
@@ -75,7 +80,7 @@ tu_load_key() {
 			[ -n "$tu_prompt" ] && kill "$tu_prompt" 2>/dev/null
 			stty echo 2>/dev/null <"$TU_CONSOLE"
 			rm -f "$TU_RUN/waiting_for"
-			tu_put unlocked_by local
+			tu_put unlocked_by local || tu_log "cannot record that the local key unlocks this boot"
 			tu_log "rehearsal: no key arrived in ${TU_REHEARSAL_MINUTES} minutes; the local key" \
 				"loads"
 			return 1

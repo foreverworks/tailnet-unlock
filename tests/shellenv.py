@@ -234,6 +234,12 @@ def copy_script(box: Sandbox, name: str) -> Path:
     text = (INITRAMFS / name).read_text()
     text = text.replace("/usr/lib/tailnet-unlock/paths.sh", str(box.lib / "paths.sh"))
     text = text.replace("/conf/tailnet-unlock.conf", str(box.conf))
+    # the panic script reads the command line, and falls back to the run directory, by itself
+    text = text.replace("/proc/cmdline", str(box.cmdline))
+    text = text.replace("/tailnet-unlock/run", str(box.run))
+    # the defaults it falls back to when paths.sh is damaged must not reach the host either
+    text = text.replace("/proc/sysrq-trigger", str(box.root / "sysrq-trigger"))
+    text = text.replace("/dev/console", str(box.console))
     target = box.lib / f"script-{name}"
     target.write_text(text)
     target.chmod(0o755)

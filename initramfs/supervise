@@ -11,16 +11,48 @@ TU_HERE=${0%/*}
 # shellcheck source=/dev/null
 . "$TU_CONF"
 
+# Neither daemon's output is kept: dropbear logs every connection and a scan could fill the 16 MiB
+# tmpfs the door's state lives on. The console line says what the supervisor did; that is enough.
 dropbear_pid=''
 tailscaled_pid=''
+dropbear_restart=0
+tailscaled_restart=0
 
+# Say so on the console when the door's state cannot be written (a full tmpfs), instead of
+# carrying on as if it had been.
+record() {
+	tu_put "$@" || tu_log "cannot record $1 in the door's state directory (is it full?)"
+}
+
+# Both daemons are stopped from the PIDs held in memory as well as from the files: a file that
+# could not be written, or not yet, must not leave one running.
 supervise_stop() {
 	trap '' TERM INT HUP
+	tu_stop "$tailscaled_pid" 10 tailscaled
+	tu_stop "$dropbear_pid" 5 dropbear
 	tu_wipe
 	rm -f "$TU_RUN/supervise.pid"
 	exit 0
 }
-trap supervise_stop TERM
+
+# A TERM that arrives between starting a daemon and holding its PID waits until it is held, so
+# the daemon is never left running unrecorded.
+in_spawn=0
+stop_pending=0
+on_term() {
+	if [ "$in_spawn" = 1 ]; then
+		stop_pending=1
+		return 0
+	fi
+	supervise_stop
+}
+spawn_done() {
+	in_spawn=0
+	if [ "$stop_pending" = 1 ]; then
+		supervise_stop
+	fi
+}
+trap on_term TERM
 trap '' HUP INT
 
 # Sleep that a TERM interrupts at once.
@@ -66,7 +98,7 @@ bring_up_uplink() {
 		uplink_device=${DEVICE-}
 		break
 	done
-	tu_put uplink_device "$uplink_device"
+	record uplink_device "$uplink_device"
 	if [ -n "$TU_DNS" ] && [ -n "$uplink_address" ]; then
 		: >/etc/resolv.conf
 		for server in $TU_DNS; do
@@ -88,38 +120,43 @@ choose_key() {
 	elif [ ! -e "$TU_TPM_DEVICE" ]; then
 		seal=no-tpm
 	elif "$TU_LIB/unseal" "$TU_ETC/door.tpm" "$TU_RUN/door_key" 2>/dev/null; then
-		tu_put seal ok
-		tu_put role sealed
+		record seal ok
+		record role sealed
 		door_key_path=$TU_RUN/door_key
 		return 0
 	else
 		seal=unseal-failed
 	fi
-	tu_put seal "$seal"
+	record seal "$seal"
 	if [ "$TU_RECOVERY" != off ] && [ -r "$TU_ETC/recovery_host_key" ]; then
-		tu_put role recovery
+		record role recovery
 		door_key_path=$TU_ETC/recovery_host_key
 		return 0
 	fi
-	tu_put role none
+	record role none
 	return 1
 }
 
-start_dropbear() {
-	choose_key || return 1
+# Start dropbear with the key at $door_key_path, as the role in the state says.
+launch_dropbear() {
 	listen=''
 	role=$(tu_get role)
 	if [ "$role" = sealed ] || [ "$TU_RECOVERY" = uplink+tailnet ]; then
 		listen="-p 127.0.0.1:$TU_PORT"
 	fi
 	[ -n "$uplink_address" ] && listen="$listen -p $uplink_address:$TU_PORT"
-	[ -n "$listen" ] || return 1
+	if [ -z "$listen" ]; then
+		[ "$door_key_path" = "$TU_RUN/door_key" ] && tu_shred "$TU_RUN/door_key"
+		return 1
+	fi
 	rm -f "$TU_RUN/dropbear.pid"
+	in_spawn=1
 	# shellcheck disable=SC2086 # $listen holds separate -p arguments on purpose
 	dropbear -F -E -r "$door_key_path" $listen -s -j -k -I "$TU_IDLE_TIMEOUT" \
-		-P "$TU_RUN/dropbear.pid" </dev/null >>"$TU_RUN/dropbear.log" 2>&1 &
+		-P "$TU_RUN/dropbear.pid" </dev/null >/dev/null 2>&1 &
 	dropbear_pid=$!
-	tu_put dropbear.child "$dropbear_pid"
+	record dropbear.child "$dropbear_pid"
+	spawn_done
 	# dropbear keeps its host key in memory: once it has written its PID file the plaintext
 	# door key can go (DESIGN.md 7.3 step 2.4)
 	waited=0
@@ -131,6 +168,49 @@ start_dropbear() {
 	tu_alive "$dropbear_pid"
 }
 
+start_dropbear() {
+	choose_key || return 1
+	launch_dropbear
+}
+
+# Stop dropbear and forget it, reaping it so its PID is not held once it is gone.
+stop_dropbear() {
+	tu_stop "$dropbear_pid" 5 dropbear
+	[ -n "$dropbear_pid" ] && wait "$dropbear_pid" 2>/dev/null
+	dropbear_pid=''
+	rm -f "$TU_RUN/dropbear.child" "$TU_RUN/dropbear.pid"
+}
+
+# The TPM refused at boot (or was not there yet) and the door runs on the recovery key, or on
+# none: try again, and when it unseals, move the door to the sealed key. Retried with a backoff
+# from 2 to 60 seconds for as long as the container and the TPM are there.
+unseal_backoff=2
+unseal_next=0
+unseal_wanted() {
+	[ "$(tu_get seal)" != ok ] && [ -d "$TU_ETC/door.tpm" ] && [ -e "$TU_TPM_DEVICE" ]
+}
+retry_unseal() {
+	now=$(uptime_seconds)
+	[ "$now" -ge "$unseal_next" ] || return 0
+	if ! "$TU_LIB/unseal" "$TU_ETC/door.tpm" "$TU_RUN/door_key" 2>/dev/null; then
+		tu_shred "$TU_RUN/door_key"
+		unseal_next=$((now + unseal_backoff))
+		unseal_backoff=$((unseal_backoff * 2))
+		[ "$unseal_backoff" -gt 60 ] && unseal_backoff=60
+		return 0
+	fi
+	record seal ok
+	record role sealed
+	stop_dropbear
+	door_key_path=$TU_RUN/door_key
+	tu_log "the TPM unsealed the door key on a retry; the door now presents the sealed key" \
+		"${TU_SEALED_FP:+(key $TU_SEALED_FP)}"
+	if ! launch_dropbear; then
+		tu_log "the door could not start with the sealed key; retrying"
+		dropbear_restart=1
+	fi
+}
+
 tailnet_wanted() {
 	[ "$TU_TAILNET" = yes ] && [ -x /usr/sbin/tailscaled ] && [ -r "$TU_ETC/unlock.state" ]
 }
@@ -138,11 +218,13 @@ tailnet_wanted() {
 start_tailscaled() {
 	tailnet_wanted || return 1
 	[ -e "$TU_RUN/unlock.state" ] || cp "$TU_ETC/unlock.state" "$TU_RUN/unlock.state" || return 1
+	in_spawn=1
 	/usr/sbin/tailscaled --state="$TU_RUN/unlock.state" --encrypt-state \
 		--tun=userspace-networking --socket="$TU_RUN/tailscaled.sock" --no-logs-no-support \
-		</dev/null >>"$TU_RUN/tailscaled.log" 2>&1 &
+		</dev/null >/dev/null 2>&1 &
 	tailscaled_pid=$!
-	tu_put tailscaled.child "$tailscaled_pid"
+	record tailscaled.child "$tailscaled_pid"
+	spawn_done
 }
 
 summary() {
@@ -167,27 +249,46 @@ supervise_loop() {
 	tailscaled_since=$dropbear_since
 	while :; do
 		nap 2
-		if [ -n "$dropbear_pid" ] && ! tu_alive "$dropbear_pid"; then
-			wait "$dropbear_pid" 2>/dev/null || :
+		if [ "$dropbear_restart" = 1 ] || { [ -n "$dropbear_pid" ] && ! tu_alive "$dropbear_pid"; }; then
+			if [ -n "$dropbear_pid" ]; then
+				wait "$dropbear_pid" 2>/dev/null || :
+				dropbear_pid=''
+			fi
 			now=$(uptime_seconds)
 			[ $((now - dropbear_since)) -ge 60 ] && dropbear_backoff=1
-			tu_count restarts.dropbear
+			tu_count restarts.dropbear || tu_log "cannot count the door's restarts"
 			tu_log "the door (dropbear) exited; starting it again in ${dropbear_backoff}s"
 			nap "$dropbear_backoff"
-			start_dropbear || tu_log "the door could not start again; retrying"
+			if start_dropbear; then
+				dropbear_restart=0
+			else
+				dropbear_restart=1
+				tu_log "the door could not start again; retrying"
+			fi
 			dropbear_since=$(uptime_seconds)
 			dropbear_backoff=$((dropbear_backoff * 2))
 			[ "$dropbear_backoff" -gt 30 ] && dropbear_backoff=30
+		elif unseal_wanted; then
+			retry_unseal
 		fi
-		if [ -n "$tailscaled_pid" ] && ! tu_alive "$tailscaled_pid"; then
-			wait "$tailscaled_pid" 2>/dev/null || :
+		if [ "$tailscaled_restart" = 1 ] ||
+			{ [ -n "$tailscaled_pid" ] && ! tu_alive "$tailscaled_pid"; }; then
+			if [ -n "$tailscaled_pid" ]; then
+				wait "$tailscaled_pid" 2>/dev/null || :
+				tailscaled_pid=''
+			fi
 			now=$(uptime_seconds)
 			[ $((now - tailscaled_since)) -ge 60 ] && tailscaled_backoff=1
-			tu_count restarts.tailscaled
+			tu_count restarts.tailscaled || tu_log "cannot count the unlock node's restarts"
 			tu_log "the unlock node (tailscaled) exited; starting it again in" \
 				"${tailscaled_backoff}s"
 			nap "$tailscaled_backoff"
-			start_tailscaled || tu_log "the unlock node could not start again; retrying"
+			if start_tailscaled; then
+				tailscaled_restart=0
+			else
+				tailscaled_restart=1
+				tu_log "the unlock node could not start again; retrying"
+			fi
 			tailscaled_since=$(uptime_seconds)
 			tailscaled_backoff=$((tailscaled_backoff * 2))
 			[ "$tailscaled_backoff" -gt 30 ] && tailscaled_backoff=30
@@ -195,9 +296,14 @@ supervise_loop() {
 	done
 }
 
-tu_put supervise.pid "$$"
-tu_put restarts.dropbear 0
-tu_put restarts.tailscaled 0
+# a supervisor that cannot record itself could never be told to stop
+if ! tu_put supervise.pid "$$"; then
+	tu_log "cannot record the supervisor in the door's state directory; no door this boot"
+	tu_wipe
+	exit 1
+fi
+record restarts.dropbear 0
+record restarts.tailscaled 0
 if tu_noshell; then
 	# a kernel panic reboots instead of hanging (DESIGN.md 7.3, exit paths)
 	printf '10\n' >"$TU_KERNEL_PANIC" 2>/dev/null || :

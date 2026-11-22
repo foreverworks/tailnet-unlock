@@ -9,6 +9,7 @@ the sysrq trigger are files in the sandbox.
 import os
 import pty
 import select
+import shutil
 import signal
 import subprocess
 import time
@@ -43,8 +44,17 @@ def environment(shell: Shell, box: Sandbox) -> dict[str, str]:
 
 @pytest.fixture
 def daemons(tmp_path: Path) -> Iterator[list[subprocess.Popen[bytes]]]:
-    """Three stand-in processes: the supervisor, dropbear and tailscaled."""
-    started = [subprocess.Popen(["sleep", "300"]) for _ in range(3)]
+    """Three stand-in processes: the supervisor, dropbear and tailscaled.
+
+    Each is `sleep` under the name of the process it stands for: the scripts only signal a PID
+    whose command line carries that name.
+    """
+    sleep = shutil.which("sleep")
+    assert sleep is not None
+    started = [
+        subprocess.Popen([name, "300"], executable=sleep)
+        for name in ("supervise", "dropbear", "tailscaled")
+    ]
     yield started
     for process in started:
         if process.poll() is None:
@@ -117,6 +127,117 @@ def test_panic_under_noshell_wipes_reboots_and_never_returns(
         time.sleep(1)
         assert process.poll() is None, "the panic script returned, so panic() would open a shell"
         assert "No shell under the measured profile" in box.console.read_text()
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_wipe_leaves_a_process_that_reused_a_recorded_pid(
+    tmp_path: Path, shell: Shell, daemons: list[subprocess.Popen[bytes]]
+) -> None:
+    """A PID in a state file may belong to another process by now; it is never signalled."""
+    box = make_sandbox(tmp_path)
+    record_daemons(box, daemons)
+    stranger = subprocess.Popen(["sleep", "300"])
+    try:
+        (box.run / "dropbear.child").write_text(f"{stranger.pid}\n")
+        script = copy_script(box, "panic")
+        completed = subprocess.run(
+            [*shell.argv, str(script)],
+            env=environment(shell, box),
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        assert completed.returncode == 0
+        assert stranger.poll() is None, "a recorded PID that is not dropbear was killed"
+        for process in (daemons[0], daemons[2]):
+            process.wait(timeout=20)
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+def start_panic(box: Sandbox, shell: Shell) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [*shell.argv, str(copy_script(box, "panic"))],
+        env=environment(shell, box),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def assert_rebooted_and_stays(
+    box: Sandbox, process: subprocess.Popen[bytes], daemons: list[subprocess.Popen[bytes]]
+) -> None:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not (box.root / "sysrq-trigger").exists():
+        time.sleep(0.2)
+    assert (box.root / "reboots").read_text().strip() == "reboot -f"
+    assert_wiped(box, daemons)
+    time.sleep(1)
+    assert process.poll() is None, "the panic script returned, so panic() would open a shell"
+
+
+def test_panic_ignores_signals_from_its_first_statement(
+    tmp_path: Path, shell: Shell, daemons: list[subprocess.Popen[bytes]]
+) -> None:
+    """The command line is read through a pipe that blocks: signals sent meanwhile do nothing."""
+    box = make_sandbox(tmp_path)
+    box.cmdline.unlink()
+    os.mkfifo(box.cmdline)
+    record_daemons(box, daemons)
+    process = start_panic(box, shell)
+    try:
+        time.sleep(1.5)
+        for signal_number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+            process.send_signal(signal_number)
+        time.sleep(0.5)
+        assert process.poll() is None, "a signal ended the panic script before it was ready"
+        with box.cmdline.open("w") as writer:
+            writer.write("BOOT_IMAGE=/vmlinuz ro tailnet-unlock.noshell quiet\n")
+        assert_rebooted_and_stays(box, process, daemons)
+    finally:
+        process.kill()
+        process.wait()
+
+
+@pytest.mark.parametrize("broken", ["paths.sh", "lib.sh", "conf", "cmdline"])
+def test_panic_with_a_damaged_file_wipes_reboots_and_never_returns(
+    tmp_path: Path, shell: Shell, daemons: list[subprocess.Popen[bytes]], broken: str
+) -> None:
+    """Under `tpm`, where the shell would open: a shared file that will not source means noshell."""
+    box = make_sandbox(tmp_path)
+    record_daemons(box, daemons)
+    garbage = "if then fi ) (\n"
+    if broken == "paths.sh":
+        original = (box.lib / "paths.sh").read_text()
+        # a damaged paths.sh cannot say where the reboot is: keep the assignments, break the rest
+        (box.lib / "paths.sh").write_text(original + garbage)
+    elif broken == "lib.sh":
+        (box.lib / "lib.sh").write_text(garbage)
+    elif broken == "conf":
+        box.conf.write_text(garbage)
+    else:
+        box.cmdline.unlink()
+    script = copy_script(box, "panic")
+    if broken == "paths.sh":
+        # without paths.sh the script reboots with `reboot` from PATH: put the sandbox one there
+        shell = Shell(shell.name, shell.argv, f"{box.bin}:{shell.path}")
+    process = subprocess.Popen(
+        [*shell.argv, str(script)],
+        env=environment(shell, box),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and not (box.root / "reboots").exists():
+            time.sleep(0.2)
+        assert (box.root / "reboots").read_text().startswith("reboot -f")
+        assert_wiped(box, daemons)
+        time.sleep(1)
+        assert process.poll() is None, "the panic script returned, so panic() would open a shell"
     finally:
         process.kill()
         process.wait()
@@ -254,3 +375,42 @@ def test_no_console_prompt_for_a_raw_key(tmp_path: Path, shell: Shell) -> None:
     (box.zfs_state / "keystatus").write_text("available\n")
     assert extension_rc(box, process) == "rc=0"
     assert "cannot be typed" in box.console.read_text()
+
+
+def test_extension_says_so_when_the_door_cannot_be_told(tmp_path: Path, shell: Shell) -> None:
+    """A state file that cannot be written (a full tmpfs) is reported; the prompt still works."""
+    box = make_sandbox(tmp_path)
+    set_dataset(box, "rpool", "raw", bytes(range(32)))
+    (box.run / ".waiting_for.new").symlink_to("/dev/full")
+    process = run_extension(box, shell, "prompt")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline and "cannot record" not in box.console.read_text():
+        time.sleep(0.2)
+    assert "cannot record the encryption root" in box.console.read_text()
+    assert not (box.run / "waiting_for").exists()
+    (box.zfs_state / "keystatus").write_text("available\n")
+    assert extension_rc(box, process) == "rc=0"
+
+
+def test_a_failed_put_is_reported_and_leaves_no_temporary_file(
+    tmp_path: Path, shell: Shell
+) -> None:
+    box = make_sandbox(tmp_path)
+    snippet = (
+        f'. "{box.lib}/paths.sh"; . "{box.lib}/lib.sh"; '
+        'tu_put seal ok; echo "first=$?"; tu_put seal bad; echo "second=$?"'
+    )
+    # a temporary file that cannot take a write, as on a full tmpfs
+    (box.run / ".seal.new").symlink_to("/dev/full")
+    completed = subprocess.run(
+        [*shell.argv, "-c", snippet],
+        env=environment(shell, box),
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    out = completed.stdout.decode()
+    assert "first=1" in out
+    assert "second=0" in out, "the failed write left its temporary file in the way"
+    assert (box.run / "seal").read_text().strip() == "bad"
+    assert not (box.run / ".seal.new").exists()

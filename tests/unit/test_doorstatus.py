@@ -48,3 +48,13 @@ def test_good() -> None:
 def test_bad(changes: dict[str, object]) -> None:
     with pytest.raises(ContractError):
         parse_door_status(line(**changes))
+
+
+def test_an_oversized_status_line_is_refused_before_it_is_parsed() -> None:
+    padded = line(kernel="k" * 255, profile="p" * 255, seal="s" * 255)
+    assert len(padded) < 4096
+    parse_door_status(padded)
+    with pytest.raises(ContractError, match="longer than"):
+        parse_door_status(line() + b" " * 4096)
+    with pytest.raises(ContractError, match="longer than"):
+        parse_door_status(b"[" * 1_000_000)

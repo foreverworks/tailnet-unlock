@@ -35,8 +35,14 @@ def shm() -> Iterator[Path]:
 
 def cli(*args: str, stdin: bytes = b"") -> subprocess.CompletedProcess[bytes]:
     environment = dict(os.environ, PYTHONPATH=str(REPO / "src"))
+    # the host's swap is none of the test's business (the check has its own unit tests)
+    runner = (
+        "import sys; from pathlib import Path; from tailnet_unlock import doorkey; "
+        "doorkey.PROC_SWAPS = Path('/dev/null'); from tailnet_unlock.cli import main; "
+        "sys.exit(main(sys.argv[1:]))"
+    )
     return subprocess.run(
-        ["python3", "-m", "tailnet_unlock", *args],
+        ["python3", "-c", runner, *args],
         input=stdin,
         capture_output=True,
         env=environment,

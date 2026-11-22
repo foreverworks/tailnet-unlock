@@ -4,7 +4,8 @@ dropbear writes an ed25519 private key as `string "ssh-ed25519"`, then `string` 
 (the 32-byte seed followed by the 32-byte public key): 83 bytes, under the TPM's 128-byte limit
 for sealed data. The pure functions here read that format and derive the OpenSSH public line (the
 pin) and its SHA256 fingerprint without running a tool; `generate_key` and `convert_openssh_key`
-are the edge that runs dropbearkey and dropbearconvert, always inside a tmpfs work directory.
+are the edge that runs dropbearkey and dropbearconvert, always inside a tmpfs work directory and
+never with swap active.
 """
 
 import base64
@@ -19,18 +20,65 @@ ED25519 = b"ssh-ed25519"
 DROPBEAR_ED25519_LENGTH = 4 + len(ED25519) + 4 + 64
 OPENSSH_PEM_BEGIN = b"-----BEGIN OPENSSH PRIVATE KEY-----"
 MAX_IMPORT_BYTES = 16384
+PROC_SWAPS = Path("/proc/swaps")
 
 
 def _string(data: bytes) -> bytes:
     return len(data).to_bytes(4, "big") + data
 
 
+_P = 2**255 - 19
+_D = -121665 * pow(121666, -1, _P) % _P
+
+
+def _add(a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """Add two points of the edwards25519 curve (affine coordinates, RFC 8032 section 5.1.4)."""
+    cross = _D * a[0] * b[0] * a[1] * b[1] % _P
+    x = (a[0] * b[1] + b[0] * a[1]) * pow(1 + cross, -1, _P) % _P
+    y = (a[1] * b[1] + a[0] * b[0]) * pow(1 - cross, -1, _P) % _P
+    return x, y
+
+
+def _base_point() -> tuple[int, int]:
+    y = 4 * pow(5, -1, _P) % _P
+    x_squared = (y * y - 1) * pow(_D * y * y + 1, -1, _P) % _P
+    x = pow(x_squared, (_P + 3) // 8, _P)
+    if (x * x - x_squared) % _P != 0:
+        x = x * pow(2, (_P - 1) // 4, _P) % _P
+    return (_P - x if x % 2 else x), y
+
+
+def ed25519_public_key(seed: bytes) -> bytes:
+    """The public key of an ed25519 seed (RFC 8032 section 5.1.5), stdlib only.
+
+    Used to check that the public half stored beside a seed is the seed's own. It runs on a
+    secret, offline, in the enrolment tool, where timing is not an exposure.
+    """
+    digest = hashlib.sha512(seed).digest()
+    scalar = int.from_bytes(digest[:32], "little")
+    scalar = (scalar & ((1 << 254) - 8)) | (1 << 254)
+    result = (0, 1)
+    addend = _base_point()
+    while scalar:
+        if scalar & 1:
+            result = _add(result, addend)
+        addend = _add(addend, addend)
+        scalar >>= 1
+    return (result[1] | (result[0] & 1) << 255).to_bytes(32, "little")
+
+
 def check_dropbear_ed25519(blob: bytes) -> bytes:
-    """Return the 32-byte public key of a dropbear ed25519 private key, or raise."""
+    """Return the 32-byte public key of a dropbear ed25519 private key, or raise.
+
+    The public half stored beside the seed must be the seed's own: a key whose halves differ would
+    be sealed and pinned under one identity and present another.
+    """
     if len(blob) != DROPBEAR_ED25519_LENGTH or not blob.startswith(_string(ED25519)):
         raise DoorKeyError("not a dropbear ed25519 private key (the door takes ed25519 only)")
     if blob[15:19] != (64).to_bytes(4, "big"):
         raise DoorKeyError("dropbear ed25519 key with an unexpected key length")
+    if ed25519_public_key(blob[19:51]) != blob[51:83]:
+        raise DoorKeyError("dropbear ed25519 key whose public half is not its seed's public key")
     return blob[51:83]
 
 
@@ -68,6 +116,25 @@ def mount_fstype(path: Path, mounts: str) -> str | None:
     return None if best is None else best[1]
 
 
+def swap_devices(swaps: str) -> list[str]:
+    """The active swap areas listed in /proc/swaps text (the first line is the header)."""
+    return [line.split()[0] for line in swaps.splitlines()[1:] if line.split()]
+
+
+def require_no_swap() -> None:
+    """Plaintext keys are only ever written to RAM that cannot be swapped out.
+
+    A tmpfs page can be written to swap, and so can the memory holding a key this process read,
+    so with any swap area active no plaintext key is made at all.
+    """
+    active = swap_devices(PROC_SWAPS.read_text(encoding="utf-8"))
+    if active:
+        raise DoorKeyError(
+            f"swap is active ({', '.join(active[:3])}): plaintext key material could be written "
+            "to disk. Run `swapoff -a` (and keep swap off) while keys are made"
+        )
+
+
 def require_tmpfs(path: Path) -> None:
     """Plaintext keys are only ever written to a tmpfs; refuse any other work directory."""
     mounts = Path("/proc/self/mounts").read_text(encoding="utf-8")
@@ -77,6 +144,7 @@ def require_tmpfs(path: Path) -> None:
 
 
 def private_workdir(parent: Path) -> Path:
+    require_no_swap()
     require_tmpfs(parent)
     work = parent / f"tailnet-unlock.{os.getpid()}.{os.urandom(6).hex()}"
     work.mkdir(mode=0o700)

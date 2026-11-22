@@ -4,27 +4,89 @@
 # neither profile sets panic=.
 #   tpm:      stop the supervisor, wipe, return; panic() opens its shell for the console.
 #   measured: wipe, then reboot and never return, so panic() never reaches its shell.
+# It fails closed: the signals are ignored from the first statement, whether the shell stays shut
+# is decided from /proc/cmdline before anything is sourced, and a shared file that will not source
+# (missing, damaged) counts as noshell, so a broken image wipes and reboots instead of opening a
+# shell beside the door.
+trap '' INT QUIT TSTP HUP TERM
 PREREQ=""
 prereqs() { echo "$PREREQ"; }
 case "${1-}" in
 prereqs) prereqs; exit 0 ;;
 esac
 
-# shellcheck source=paths.sh
-. /usr/lib/tailnet-unlock/paths.sh
-# shellcheck source=lib.sh
-. "$TU_LIB/lib.sh"
-# shellcheck source=/dev/null
-[ -r "$TU_CONF" ] && . "$TU_CONF"
+noshell=0
+sane=1
+run_dir=/tailnet-unlock/run
 
-if tu_noshell; then
-	trap '' INT QUIT TSTP HUP TERM
-	[ -d "$TU_RUN" ] && tu_stop_supervisor 5
-	tu_log "the boot failed; the door is stopped and wiped. No shell under the measured" \
-		"profile: rebooting in 10 seconds"
-	sleep "$TU_PANIC_DELAY"
-	"$TU_REBOOT" -f
-	echo b >"$TU_SYSRQ" 2>/dev/null
+# self-contained: the command line says so, or cannot be read
+words=''
+[ -r /proc/cmdline ] || noshell=1
+read -r words 2>/dev/null </proc/cmdline || :
+case " $words " in
+*" tailnet-unlock.noshell "* | *" tailnet-unlock.noshell=1 "*) noshell=1 ;;
+esac
+
+# Each shared file is tried in a subshell first: a file that fails to source ends only that
+# subshell, never this script (a failed `.` ends a non-interactive shell).
+# shellcheck source=paths.sh
+if ( . /usr/lib/tailnet-unlock/paths.sh ) 2>/dev/null; then
+	. /usr/lib/tailnet-unlock/paths.sh
+	run_dir=$TU_RUN
+else
+	sane=0
+fi
+if [ "$sane" = 1 ]; then
+	# shellcheck source=lib.sh
+	if ( . "$TU_LIB/lib.sh" ) 2>/dev/null; then
+		. "$TU_LIB/lib.sh"
+	else
+		sane=0
+	fi
+fi
+# no configuration at all is an image without a door; one that exists but will not source is not
+if [ "$sane" = 1 ] && [ -e "$TU_CONF" ]; then
+	# shellcheck source=/dev/null
+	if ( . "$TU_CONF" ) 2>/dev/null; then
+		. "$TU_CONF"
+	else
+		sane=0
+	fi
+fi
+if [ "$sane" = 1 ]; then
+	if [ "$noshell" = 0 ] && tu_noshell; then
+		noshell=1
+	fi
+else
+	noshell=1
+fi
+
+# The wipe when lib.sh cannot be trusted: kill what the state files name and delete the state
+# directory's contents. No PID is signalled unless it is a plain number above 1.
+panic_wipe_unaided() {
+	for panic_file in tailscaled.child dropbear.child supervise.pid; do
+		panic_pid=''
+		read -r panic_pid 2>/dev/null <"$run_dir/$panic_file" || :
+		case "$panic_pid" in
+		'' | 0 | 1 | *[!0-9]*) continue ;;
+		esac
+		kill -KILL "$panic_pid" 2>/dev/null || :
+	done
+	[ -n "$run_dir" ] || return 0
+	rm -rf "${run_dir:?}"/* "${run_dir:?}"/.[!.]* 2>/dev/null || :
+}
+
+if [ "$noshell" = 1 ]; then
+	if [ "$sane" = 1 ]; then
+		[ -d "$TU_RUN" ] && tu_stop_supervisor 5
+	else
+		panic_wipe_unaided
+	fi
+	printf 'tailnet-unlock: the boot failed; the door is stopped and wiped. No shell under the measured profile: rebooting in %s seconds\n' \
+		"${TU_PANIC_DELAY:-10}" 2>/dev/null >"${TU_CONSOLE:-/dev/console}"
+	sleep "${TU_PANIC_DELAY:-10}"
+	"${TU_REBOOT:-reboot}" -f
+	echo b >"${TU_SYSRQ:-/proc/sysrq-trigger}" 2>/dev/null
 	while :; do
 		sleep 3600
 	done

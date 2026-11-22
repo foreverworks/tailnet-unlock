@@ -6,7 +6,7 @@
 tu_log() {
 	tu_up=''
 	read -r tu_up _ 2>/dev/null </proc/uptime || :
-	printf 'tailnet-unlock: [%s] %s\n' "${tu_up:-?}" "$*" 2>/dev/null >"$TU_CONSOLE" || :
+	printf 'tailnet-unlock: [%s] %s\n' "${tu_up:-?}" "$*" 2>/dev/null >>"$TU_CONSOLE" || :
 }
 
 # A JSON string for a value, or null when it is empty. Values here are machine tokens (dataset
@@ -39,9 +39,16 @@ tu_get() {
 	printf '%s' "$tu_line"
 }
 
-# Write one value to a file in the run directory: written beside it, then renamed.
+# Write one value to a file in the run directory: written beside it, then renamed. Fails (and
+# leaves the old value and no temporary file) when the write does, as it does on a full tmpfs;
+# every caller whose door depends on the value says so on the console.
 tu_put() {
-	( umask 077 && printf '%s\n' "$2" >"$TU_RUN/.$1.new" ) && mv -f "$TU_RUN/.$1.new" "$TU_RUN/$1"
+	if ( umask 077 && printf '%s\n' "$2" >"$TU_RUN/.$1.new" ) 2>/dev/null &&
+		mv -f "$TU_RUN/.$1.new" "$TU_RUN/$1" 2>/dev/null; then
+		return 0
+	fi
+	rm -f "$TU_RUN/.$1.new" 2>/dev/null
+	return 1
 }
 
 # Add one to a counter in the run directory.
@@ -88,10 +95,27 @@ tu_descendants() {
 	done
 }
 
-# Stop one process and its descendants: TERM, up to $2 seconds, then KILL.
+# True when a process is a number that can be signalled and its command line holds a name: a PID
+# read from a file may belong to something else by now (PIDs are reused), and is never signalled.
+tu_named() {
+	[ -n "${2-}" ] || return 1
+	case "${1-}" in
+	'' | 0 | 1 | *[!0-9]*) return 1 ;;
+	esac
+	tu_cmd=$(tr '\0' ' ' 2>/dev/null <"/proc/$1/cmdline") || return 1
+	case "$tu_cmd" in
+	*"$2"*) return 0 ;;
+	esac
+	return 1
+}
+
+# Stop one process and its descendants: TERM, up to $2 seconds, then KILL. $3 is a word that must
+# be in the process's command line (dropbear, tailscaled, supervise), so a recorded PID that the
+# system has since given to another process is left alone.
 tu_stop() {
 	tu_target=${1-}
 	[ -n "$tu_target" ] || return 0
+	tu_named "$tu_target" "${3-}" || return 0
 	tu_children=$(tu_descendants "$tu_target")
 	# shellcheck disable=SC2086 # one PID per word, split on purpose
 	kill -TERM "$tu_target" $tu_children 2>/dev/null || :
@@ -100,8 +124,10 @@ tu_stop() {
 		sleep 1
 		tu_waited=$((tu_waited + 1))
 	done
-	# shellcheck disable=SC2086 # one PID per word, split on purpose
-	kill -KILL "$tu_target" $tu_children 2>/dev/null || :
+	if tu_named "$tu_target" "$3"; then
+		# shellcheck disable=SC2086 # one PID per word, split on purpose
+		kill -KILL "$tu_target" $tu_children 2>/dev/null || :
+	fi
 	return 0
 }
 
@@ -113,11 +139,14 @@ tu_shred() {
 	rm -f "$1"
 }
 
-# Stop both daemons from their recorded PIDs and delete the door material. Idempotent: the
-# supervisor's TERM handler, init-bottom and the panic script all call it.
+# Stop both daemons from their recorded PIDs and delete the door material: the door key, the node
+# state copy, the unseal work directories and the recovery key's copy. What stays is public or
+# sealed and is on /boot beside the image anyway (the container, the authorized_keys, the
+# configuration). Idempotent: the supervisor's TERM handler, init-bottom and the panic script all
+# call it.
 tu_wipe() {
-	tu_stop "$(tu_get tailscaled.child)" 10
-	tu_stop "$(tu_get dropbear.child)" 5
+	tu_stop "$(tu_get tailscaled.child)" 10 tailscaled
+	tu_stop "$(tu_get dropbear.child)" 5 dropbear
 	rm -f "$TU_RUN/tailscaled.child" "$TU_RUN/dropbear.child"
 	tu_shred "$TU_RUN/door_key"
 	tu_shred "$TU_RUN/unlock.state"
@@ -132,7 +161,7 @@ tu_wipe() {
 
 # Ask the supervisor to stop (it wipes on TERM), then wipe anyway from the recorded PIDs.
 tu_stop_supervisor() {
-	tu_stop "$(tu_get supervise.pid)" "${1:-15}"
+	tu_stop "$(tu_get supervise.pid)" "${1:-15}" supervise
 	rm -f "$TU_RUN/supervise.pid"
 	tu_wipe
 }

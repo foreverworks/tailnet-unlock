@@ -65,7 +65,7 @@ door_load() {
 	root=$1
 	[ "$(door_keystatus "$root")" = available ] && door_result not-waiting 2
 	if head -c 512 | "$TU_ZFS" load-key -L prompt "$root" >/dev/null 2>&1; then
-		tu_put unlocked_by "$(tu_get role)"
+		tu_put unlocked_by "$(tu_get role)" || tu_log "cannot record who unlocked this boot"
 		door_result loaded 0
 	fi
 	[ "$(door_keystatus "$root")" = available ] && door_result not-waiting 2

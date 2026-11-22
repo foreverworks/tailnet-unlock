@@ -5,13 +5,17 @@ from pathlib import Path
 import pytest
 
 from keys import DOOR, DOOR_PIN
+from tailnet_unlock import doorkey
 from tailnet_unlock.container import Container, read_container, write_container
 from tailnet_unlock.doorkey import (
     check_dropbear_ed25519,
+    ed25519_public_key,
     fingerprint,
     mount_fstype,
     pin_line,
+    private_workdir,
     remove_tree,
+    swap_devices,
 )
 from tailnet_unlock.errors import DoorKeyError
 
@@ -35,6 +39,48 @@ def test_dropbear_format_is_83_bytes_and_fits_the_tpm() -> None:
 def test_not_a_dropbear_ed25519_key(blob: bytes) -> None:
     with pytest.raises(DoorKeyError):
         check_dropbear_ed25519(blob)
+
+
+def test_the_public_half_must_be_the_seeds_own() -> None:
+    forged = DOOR[:51] + bytes(32)
+    with pytest.raises(DoorKeyError, match="public half"):
+        check_dropbear_ed25519(forged)
+    swapped = DOOR[:19] + bytes([0x33]) * 32 + DOOR[51:]
+    with pytest.raises(DoorKeyError, match="public half"):
+        check_dropbear_ed25519(swapped)
+
+
+def test_ed25519_public_key_matches_the_rfc_8032_vectors() -> None:
+    vectors = [
+        (
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+        ),
+        (
+            "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+            "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+        ),
+    ]
+    for seed, public in vectors:
+        assert ed25519_public_key(bytes.fromhex(seed)).hex() == public
+
+
+def test_swap_devices_reads_proc_swaps() -> None:
+    header = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
+    assert swap_devices(header) == []
+    assert swap_devices(header + "/dev/zram0 partition 1024 0 100\n") == ["/dev/zram0"]
+    assert swap_devices("") == []
+
+
+def test_no_plaintext_key_is_made_while_swap_is_active(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    swaps = tmp_path / "swaps"
+    swaps.write_text("Filename Type Size Used Priority\n/swapfile file 1024 0 -2\n")
+    monkeypatch.setattr(doorkey, "PROC_SWAPS", swaps)
+    with pytest.raises(DoorKeyError, match="swap is active"):
+        private_workdir(tmp_path)
+    assert list(tmp_path.glob("tailnet-unlock.*")) == []
 
 
 def test_pin_and_fingerprint_match_openssh() -> None:

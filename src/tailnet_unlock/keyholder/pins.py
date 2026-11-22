@@ -15,7 +15,8 @@ from tailnet_unlock.errors import ConfigError, ContractError
 
 type DoorRole = Literal["sealed", "recovery"]
 
-_ADDRESS = re.compile(r"[A-Za-z0-9.:-]{1,253}")
+# a host name or address never starts with "-", which an SSH client would read as an option
+_ADDRESS = re.compile(r"[A-Za-z0-9.:][A-Za-z0-9.:-]{0,252}")
 
 
 @dataclass(frozen=True)

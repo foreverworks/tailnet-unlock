@@ -44,7 +44,9 @@ def test_a_copy_of_boot_claiming_sealed_is_refused() -> None:
         check_reported_key("sealed", ["sealed"])
 
 
-@pytest.mark.parametrize("address", ["", "a b", "x;id", "[::1]", "h" * 254])
+@pytest.mark.parametrize(
+    "address", ["", "a b", "x;id", "[::1]", "h" * 254, "-oProxyCommand=id", "-web-1", "-"]
+)
 def test_known_hosts_refuses_odd_addresses(address: str) -> None:
     with pytest.raises(ConfigError):
         known_hosts(PINS, "sealed", address)

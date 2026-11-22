@@ -244,7 +244,11 @@ package) into the image.
       `BOOTIF=` (DHCP or static, matched by MAC so interface names do not matter), and writes
       `/etc/resolv.conf` from the DHCP answer or the configured resolvers.
    3. Unseals the door key into the tmpfs (section 8.4). On failure it records why and, if the
-      recovery door is enabled, uses the recovery key instead.
+      recovery door is enabled, uses the recovery key instead. A failure is not final: while the
+      seal result is not `ok`, the container is there and the TPM device is present, the supervisor's
+      loop asks again (a backoff from 2 to 60 seconds), because a TPM that is slow or busy at boot
+      would otherwise pin the whole boot to the recovery key. When it unseals, the supervisor
+      records `seal ok` and the sealed role, stops dropbear and starts it again with the sealed key.
    4. Starts dropbear in the foreground of its own child process, so the supervisor holds its PID:
       `dropbear -F -E -r <key> -p 127.0.0.1:<port> -p <uplink address>:<port> -s -j -k -I 600 -P <tmpfs>/dropbear.pid`
       (`-p [address:]port` may repeat; `-s` refuses passwords, `-j -k` refuse forwarding, `-I` ends
@@ -254,6 +258,11 @@ package) into the image.
       As soon as dropbear has written its PID file, the supervisor deletes the plaintext door key:
       dropbear 2025.89 keeps its host key in memory and does not read the file again for new
       connections (checked in M1), so from then on the unsealed key exists only inside dropbear.
+      Neither daemon's output is kept: dropbear logs every connection, and a scan of the uplink
+      could otherwise fill the 16 MiB tmpfs that holds the door's state (the supervisor's console
+      lines say what happened). Every write to that state goes through one function that reports
+      failure; the supervisor says so on the console, and a supervisor that cannot record its own
+      PID refuses to run, since init-bottom could never stop it.
    5. If the tailnet door is on (`tailnet.enabled`), starts
       `tailscaled --state=<tmpfs copy of the sealed state> --encrypt-state --tun=userspace-networking
       --socket=<tmpfs>/tailscaled.sock --no-logs-no-support`. The state already holds the login, the
@@ -272,7 +281,12 @@ package) into the image.
       reports the counts (`restarts`). A daemon that cannot start at all (the unseal now fails, the
       binary is gone) is retried at the longest backoff and reported, never given up on silently.
       The supervisor's TERM handler is the one place that stops the daemons and wipes (step 5 and
-      the exit paths below).
+      the exit paths below). It stops them from the PIDs it holds in memory as well as from the
+      state files, and a TERM that arrives while a daemon is being started waits until the daemon's
+      PID is held, so neither a missing record nor a restart in progress leaves an orphan. A PID is
+      only signalled while the process's command line still names the daemon (`dropbear`,
+      `tailscaled`, `supervise`): PIDs are reused, and a number read from a file may belong to
+      something else by then.
 3. **ZFS import and key** (OpenZFS's `mountroot`): the pool is imported and `decrypt_fs` sources each
    load-key extension before it prompts. Ours:
    1. If the encryption root's `keylocation` is a file present in the image and no rehearsal is
@@ -354,9 +368,14 @@ package) into the image.
    its own node; the unlock node stays offline until the next boot.
 
 **Exit paths, and the wipe on each** (decision D26). Once the supervisor runs, a boot leaves the
-waiting initramfs by exactly one of these paths, and each one wipes the door material (stops both
-daemons, deletes the door key if it is still a file, the copies of the sealed container and node
-state, and the recovery key copy):
+waiting initramfs by exactly one of these paths, and each one wipes the door material: it stops both
+daemons, overwrites and deletes the plaintext door key if it is still a file, the copy of the node
+state in the tmpfs, the unseal work directories and the initramfs's copy of the recovery key, and
+removes the daemons' socket and PID files. It does not delete the sealed container, the
+`authorized_keys`, the configuration or the public half of any key: they are public or sealed, and
+the same bytes are on `/boot` in the image itself, so deleting the copy inside the running
+initramfs protects nothing. The recovery key is the one secret in the image, and it is on `/boot`
+as well (section 9): its copy is wiped for tidiness, not as a boundary.
 
 1. **The root mounts** (step 5): init-bottom stops the supervisor, whose TERM handler wipes.
 2. **`panic()`**, which initramfs-tools calls for every failure it does not handle itself (a pool that
@@ -371,11 +390,15 @@ state, and the recovery key copy):
      PIDs, and returns; `panic()` then opens its shell for the person at the console. If that
      person leaves the shell, the boot goes on without a door: the console prompt remains.
    - **`measured`**: the UKI's embedded command line carries `tailnet-unlock.noshell`. The script
-     ignores INT, QUIT, TSTP, HUP and TERM, wipes, prints why, waits 10 seconds so the reason can
+     ignores INT, QUIT, TSTP, HUP and TERM from its first statement, wipes, prints why, waits 10 seconds so the reason can
      be read on the console, runs `reboot -f`, then `echo b > /proc/sysrq-trigger` should that
      return, then sleeps forever. It never returns, so `panic()` never reaches its shell. The script
      takes this branch when the rendered profile is `measured` or the word is on the command line,
-     so an image built without a valid configuration still keeps the shell shut. The supervisor
+     so an image built without a valid configuration still keeps the shell shut. It decides this
+     from `/proc/cmdline` before it sources anything, and a shared file that is missing or will not
+     source (`paths.sh`, `lib.sh`, the configuration) counts as noshell too: the script then wipes
+     without the library (it kills the PIDs the state files hold and empties the state directory),
+     reboots and never returns, so a damaged image cannot be turned into a shell beside the door. The supervisor
      also sets `/proc/sys/kernel/panic` to 10 under `measured`, so a kernel panic reboots instead of
      hanging (a hang opens no shell either; the reboot only saves a trip to the power switch).
 3. **A failure inside our premount script** before the supervisor starts: its own cleanup removes
@@ -470,7 +493,11 @@ takes the equivalent `acls` rules, and the VM suite checks the same rules live a
 
 **Where the door key comes from** (decision D23): `door.key_source = "generate"` (the default) makes it
 on the box with `dropbearkey -t ed25519` in a tmpfs, seals it, and deletes the plaintext; the pin is
-printed afterwards. `"import"` takes a key the consumer provisions from its own secret store
+printed afterwards. Every command that makes or converts a plaintext key refuses while any swap area
+is active (`/proc/swaps`): a tmpfs page, like the memory of the process holding the key, can be
+written to swap. The tool says so and asks for `swapoff -a` for the time it takes. (The other
+option, piping the key from `dropbearkey` straight into `tpm2_create`, would avoid the file but not
+the key in memory, and would not cover an imported key; the refusal covers every path.) `"import"` takes a key the consumer provisions from its own secret store
 (`tailnet-unlock enroll --door-key-file -` reads an ed25519 private key in OpenSSH or dropbear format on
 stdin, converted with `dropbearconvert`), seals it the same way and deletes the plaintext; its pin is
 known in advance. For the door key, both sources end in the same sealed container and the same kind of
@@ -1381,6 +1408,18 @@ A security re-review (2026-11-21) found five gaps, fixed in this revision before
 | R3 | The recovery acknowledgement was not in the enforced list, and the recovery key's import had no flag | Refused without it (10.2 step 4, 10.3; T24); `--recovery-key-file -`, and the recovery key is never sealed (8.1; T21) |
 | R4 | A dropbear or tailscaled that dies while the box waits stayed dead | A supervisor restarts both with a backoff (7.3 step 2; D32; T26), and a wrong key is shown not to be an exit (T27) |
 | R5 | A full `/boot`, or a failing Tailscale trigger, could fail a package | The hook degrades to the uplink door (`boot-space`), and the trigger always exits 0 (7.2, 12.1; T18) |
+
+A security review of M1 (2026-11-21) found these, fixed in code with tests:
+
+| # | Finding | Outcome |
+|---|---|---|
+| S1 | dropbear's log in the 16 MiB state tmpfs could be filled from the network | No daemon output is kept; every state write reports failure and the callers say so (7.3 step 2.4) |
+| S2 | The panic script could be signalled, or fail open, before it was ready | Signals ignored from the first statement; `noshell` read from `/proc/cmdline` first; a file that will not source means noshell (7.3, exit paths) |
+| S3 | A stop during a start, or an unrecorded PID, left a daemon running; a reused PID could be signalled | The supervisor stops from memory and files, defers TERM during a start, and signals a PID only when its command line names the daemon (7.3 step 2.7) |
+| S4 | A plaintext key could reach swap | Key making refuses while swap is active (8.1) |
+| S5 | One transient TPM failure kept the whole boot on the recovery key | The supervisor retries the unseal and moves the door to the sealed key (7.3 step 2.3) |
+| S6 | The wipe list claimed more than the code did | The list now says what is wiped and why the rest is not (7.3, exit paths) |
+| S7 | Smaller: the stored public half of a key was not checked against its seed; a host name could start with `-`; door status and key files were read without a cap; a failed recovery key write left plaintext | Each is checked or capped at its source, with a test |
 
 ### Open questions from M1
 
