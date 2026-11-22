@@ -14,7 +14,10 @@ fi
 seed=/run/tailnet-unlock-seed
 mkdir -p "$seed"
 mount -o ro /dev/disk/by-label/CIDATA "$seed" 2>/dev/null || mount -o ro LABEL=CIDATA "$seed"
+# the trace would print the passphrase, and no log may hold it (scenario T14)
+set +x
 . "$seed/vars.sh"
+set -x
 
 export DEBIAN_FRONTEND=noninteractive
 sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.list.d/debian.sources
@@ -31,7 +34,9 @@ sgdisk -n1:1M:+512M -t1:EF00 -n2:0:+1G -t2:8300 -n3:0:0 -t3:BF00 "$disk"
 partprobe "$disk"; udevadm settle
 mkfs.vfat -F32 -n ESP "${disk}1"
 mkfs.ext4 -q -L boot "${disk}2"
+set +x
 printf '%s' "$TEST_PASSPHRASE" >/run/rpool.key
+set -x
 zpool create -f -o ashift=12 -O encryption=on -O keyformat=passphrase \
 	-O keylocation=file:///run/rpool.key -O compression=lz4 -O acltype=posixacl -O xattr=sa \
 	-O mountpoint=none -R /mnt rpool "${disk}3"
@@ -100,6 +105,8 @@ After=local-fs.target
 Type=oneshot
 ExecStart=/bin/sh /usr/local/sbin/tailnet-unlock-firstboot
 StandardOutput=journal+console
+[Install]
+WantedBy=multi-user.target
 UNIT
 cat >/etc/systemd/system/tailnet-unlock-report.service <<'UNIT'
 [Unit]
@@ -108,6 +115,8 @@ After=local-fs.target
 [Service]
 Type=oneshot
 ExecStart=/bin/sh -c 'echo "TU-SCENARIO boot.json $(cat /run/tailnet-unlock/boot.json 2>/dev/null)" >/dev/ttyS0'
+[Install]
+WantedBy=multi-user.target
 UNIT
 systemctl enable tailnet-unlock-firstboot.service tailnet-unlock-report.service ssh.service
 mkdir -p /etc/systemd/system/multi-user.target.wants
