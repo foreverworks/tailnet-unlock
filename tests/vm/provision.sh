@@ -36,6 +36,9 @@ mkdir -p /mnt/boot/efi && mount "${disk}1" /mnt/boot/efi
 
 debootstrap --components=main,contrib trixie /mnt http://deb.debian.org/debian
 cp /etc/apt/sources.list.d/debian.sources /mnt/etc/apt/sources.list.d/
+# the cloud image's mirror lists do not exist in the new root: use the mirrors themselves
+sed -i 's#mirror+file:/etc/apt/mirrors/debian.list#http://deb.debian.org/debian#; s#mirror+file:/etc/apt/mirrors/debian-security.list#http://deb.debian.org/debian-security#' \
+	/mnt/etc/apt/sources.list.d/debian.sources
 rm -f /mnt/etc/apt/sources.list
 for d in dev proc sys run; do mount --rbind "/$d" "/mnt/$d"; done
 install -D -m 0600 /run/rpool.key /mnt/etc/zfs/rpool.key
