@@ -30,12 +30,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         with:
-          python-version: ${{ matrix.python }}
-          allow-prereleases: ${{ matrix.prerelease }}
+          version: "0.13.9"
+          enable-cache: false
+      - name: Python ${{ matrix.python }}
+        # uv, not setup-python: the fleet's runners are Debian VMs, which setup-python has no builds for
+        run: |
+          uv python install ${{ matrix.python }}
+          uv venv --python ${{ matrix.python }} "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dash busybox
-      - run: python -m pip install pytest==9.2.0
+      - run: uv pip install --python "$RUNNER_TEMP/venv/bin/python" pytest==9.2.0
       - run: make unit PYTHON=python
 
   container:
