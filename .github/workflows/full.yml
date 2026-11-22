@@ -95,7 +95,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf swtpm \
-            swtpm-tools dropbear-bin python3-pytest openssh-client git
+            swtpm-tools dropbear-bin python3-pytest openssh-client git xorriso
       - run: make vm-test PYTHON=python3
       - if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2

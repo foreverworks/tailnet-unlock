@@ -1,7 +1,8 @@
 """The M1 VM scenarios (DESIGN.md 15.3) on a host with KVM, QEMU, OVMF and swtpm.
 
 `make vm-test` runs them. The first run builds the guest: a builder VM boots Debian 13's official
-cloud image (fetched with its SHA512SUMS, read at run time) with a NoCloud seed, writes the target
+cloud image (fetched with its SHA512SUMS, read at run time) with a NoCloud seed (an ISO made
+with xorriso), writes the target
 disk with provision.sh, and the target's first boot (firstboot.sh) seals an imported test door key
 to the target's own swtpm and moves the root to keylocation=prompt. The result is cached by the
 hash of its inputs. Each scenario then boots an overlay of that disk with a copy of that TPM.
@@ -151,10 +152,25 @@ def build_guest() -> Guest:
     target = cache / "target.qcow2"
     run(["qemu-img", "create", "-q", "-f", "qcow2", str(target), "8G"])
     mac = "00:00:5e:00:53:11"
-    seed_drive = (
-        f"file.driver=vvfat,file.dir={seed},file.label=CIDATA,file.fat-type=32,"
-        "format=raw,if=virtio,readonly=on"
+    # a real ISO 9660 image: QEMU's vvfat directory emulation is experimental and gave cloud-init
+    # unreadable clusters on a CI runner
+    seed_iso = cache / "seed.iso"
+    run(
+        [
+            "xorriso",
+            "-as",
+            "mkisofs",
+            "-quiet",
+            "-o",
+            str(seed_iso),
+            "-V",
+            "CIDATA",
+            "-J",
+            "-R",
+            str(seed),
+        ]
     )
+    seed_drive = f"file={seed_iso},if=virtio,format=raw,readonly=on"
     builder = VmSpec(
         name="tu-builder",
         workdir=cache / "builder",
@@ -166,6 +182,8 @@ def build_guest() -> Guest:
     )
     vm = start(builder)
     try:
+        # provision.sh's first trace line: the seed was read and the script started
+        expect(vm.console, r"\+ seed=/run/tailnet-unlock-seed", 300)
         # the log is tailed to the console; a failed run ends with `TU-PROVISION rc=<n>`
         outcome = expect(vm.console, r"TU-PROVISION (done|rc=\d+)", 3600)
         assert outcome.group(1) == "done", f"the builder's provision.sh failed: {outcome.group(0)}"
