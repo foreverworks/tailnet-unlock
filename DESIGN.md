@@ -1225,9 +1225,8 @@ unit` is what CI's check job runs.
 | Release | a version tag | the full matrix and the VM scenarios on every supported Debian release (13 and 14), all required, plus the VM scenarios against a throwaway Tailscale tailnet (an OAuth client in the repository's secrets, scoped to auth keys for a test tag); then the release assets are built | GitHub-hosted runners |
 | Hardware | before each release, by hand | the scenarios that need real hardware on one machine with a discrete TPM and one with a firmware TPM; results in the release notes | the maintainer's machines |
 
-Every workflow job runs on self-hosted runners while the repository is private and on GitHub-hosted
-runners otherwise, and a fork's pull request never reaches a self-hosted runner. Secrets are never
-available to pull requests from forks. Debian 14 runs use initramfs-tools until the dracut module (M5).
+Every workflow job runs on GitHub-hosted runners. Secrets are never available to pull requests from
+forks. Debian 14 runs use initramfs-tools until the dracut module (M5).
 
 ### 15.2 The VM harness
 

@@ -10,10 +10,7 @@ permissions:
   contents: read
 jobs:
   check:
-    # a fork's pull request never reaches a self-hosted runner (it exists only once the repository
-    # is public, and then the jobs run on GitHub's)
-    if: ${{ !github.event.repository.private || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: ${{ github.event.repository.private && 'tailnet-unlock' || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
