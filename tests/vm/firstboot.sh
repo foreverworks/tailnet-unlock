@@ -3,7 +3,6 @@
 # make the recovery key, write the configuration, move the root to keylocation=prompt, rebuild the
 # images without the key, print the pins on the serial console, power off. Test values only.
 set -eux
-. /opt/tailnet-unlock/vars.sh
 mkdir -p /etc/tailnet-unlock /run/tailnet-unlock
 cat >/etc/tailnet-unlock/box.toml <<EOF
 [network]

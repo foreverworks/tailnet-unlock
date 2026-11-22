@@ -121,7 +121,8 @@ def build_guest() -> Guest:
     keygen(keys / "keyholder")
     keygen(keys / "operator")
     keygen(keys / "harness_ssh")
-    (seed / "vars.sh").write_text(f"TEST_PASSPHRASE='{PASSPHRASE}'\n")
+    # a file the builder copies, so that no shell trace line or command line carries the text
+    (seed / "rpool.key").write_text(PASSPHRASE)
     shutil.copy(REPO / "tests/vm/provision.sh", seed / "provision.sh")
     shutil.copy(REPO / "tests/vm/firstboot.sh", seed / "firstboot.sh")
     run(["git", "-C", str(REPO), "archive", "-o", str(seed / "repo.tar"), "HEAD"])
@@ -428,6 +429,6 @@ def test_t28_break_mount_wipes_before_the_shell(guest: Guest, boot: Boot) -> Non
 def test_t14_the_key_appears_in_no_log(guest: Guest, tmp_path: Path) -> None:
     """Runs last in this module: every console and QEMU log the scenarios wrote."""
     logs = [path for path in tmp_path.parent.rglob("*.log") if path.is_file()]
-    logs += [path for path in CACHE.rglob("*.log") if path.is_file()]
+    logs += [path for path in guest.disk.parent.rglob("*.log") if path.is_file()]
     for path in logs:
         assert PASSPHRASE.encode() not in path.read_bytes(), path
