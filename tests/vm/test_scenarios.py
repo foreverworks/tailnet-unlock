@@ -307,31 +307,40 @@ def door(
 
 
 def guest_ssh(guest: Guest, booted: Booted, command: str) -> subprocess.CompletedProcess[bytes]:
-    """Run a command on the booted system as root, waiting for its sshd (it starts after the
-    boot record is printed, so the first tries may be refused: ssh exits 255 for those)."""
-    argv = [
-        "ssh",
-        "-p",
-        str(booted.ssh_port),
-        "-i",
-        str(guest.keys / "harness_ssh"),
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "ConnectTimeout=10",
-        "root@127.0.0.1",
-        command,
-    ]
+    """Run a command on the booted system as root, once its sshd answers.
+
+    sshd starts after the boot record is printed, so a probe (`true`) is retried until it works
+    and a probe that never does fails with ssh's own message. The command itself runs once: it
+    may be one that ends the connection, like a reboot.
+    """
+
+    def run_ssh(remote: str) -> subprocess.CompletedProcess[bytes]:
+        argv = [
+            "ssh",
+            "-p",
+            str(booted.ssh_port),
+            "-i",
+            str(guest.keys / "harness_ssh"),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=10",
+            "root@127.0.0.1",
+            remote,
+        ]
+        return subprocess.run(argv, capture_output=True, timeout=300, check=False)
+
     deadline = time.monotonic() + 180
-    while True:
-        completed = subprocess.run(argv, capture_output=True, timeout=300, check=False)
-        if completed.returncode != 255 or time.monotonic() > deadline:
-            return completed
+    probe = run_ssh("true")
+    while probe.returncode != 0 and time.monotonic() < deadline:
         time.sleep(3)
+        probe = run_ssh("true")
+    assert probe.returncode == 0, f"no ssh to the guest: {probe.stderr.decode(errors='replace')}"
+    return run_ssh(command)
 
 
 def wait_for_door(guest: Guest, booted: Booted, role: str) -> tuple[str, str]:
