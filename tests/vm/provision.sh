@@ -112,19 +112,22 @@ for d in dev proc sys run; do umount -R -l "/mnt/$d"; done
 umount /mnt/boot/efi /mnt/boot
 cd /
 sync
-# what may still hold the pool, for the log
-grep ' /mnt' /proc/self/mountinfo | cut -c1-150 || :
-for p in /proc/[0-9]*; do
-	ls -l "$p/cwd" "$p/root" "$p/exe" "$p/fd" 2>/dev/null | grep ' /mnt' | sed "s#^#$p: #" || :
-done
-zfs list -r -o name,mounted,mountpoint rpool || :
+# the event daemon and anything else that may hold the pool open
+systemctl stop zfs-zed.service zfs-mount.service zfs-share.service 2>&1 || :
 for _ in 1 2 3 4 5; do
 	zpool export rpool && break
-	zfs unmount -a -f 2>&1 || :
-	umount -R -l /mnt 2>&1 || :
 	sleep 3
 done
-zpool list rpool >/dev/null 2>&1 && zpool export -f rpool
+if zpool list rpool >/dev/null 2>&1; then
+	echo "DIAG: the pool is still busy"
+	zpool status rpool || :
+	zfs list -r -o name,mounted,mountpoint rpool || :
+	for p in /proc/[0-9]*; do
+		ls -l "$p/cwd" "$p/root" "$p/fd" 2>/dev/null | grep -E ' /mnt|/dev/vdb|rpool' | sed "s#^#$p: #" || :
+	done
+	ps -eo pid,comm,args | grep -i "zfs\|zed\|zpool\|dkms" | grep -v grep || :
+	zpool export -f rpool
+fi
 echo "TU-PROVISION done"
 # the log is tailed to the console: give the tail time to print the line before the power goes
 sleep 5
