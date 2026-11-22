@@ -119,6 +119,7 @@ for _ in 1 2 3 4 5; do
 	sleep 3
 done
 if zpool list rpool >/dev/null 2>&1; then
+	set +x
 	echo "DIAG: the pool is still busy"
 	zpool status rpool || :
 	zfs list -r -o name,mounted,mountpoint rpool || :
@@ -126,6 +127,8 @@ if zpool list rpool >/dev/null 2>&1; then
 		ls -l "$p/cwd" "$p/root" "$p/fd" 2>/dev/null | grep -E ' /mnt|/dev/vdb|rpool' | sed "s#^#$p: #" || :
 	done
 	ps -eo pid,comm,args | grep -i "zfs\|zed\|zpool\|dkms" | grep -v grep || :
+	echo "DIAG: end"
+	set -x
 	zpool export -f rpool
 fi
 echo "TU-PROVISION done"
