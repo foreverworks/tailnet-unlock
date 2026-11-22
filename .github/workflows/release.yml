@@ -10,8 +10,7 @@ jobs:
   on-main:
     # a tag is a release only when its commit is on main: a tag on a side branch is refused before
     # anything runs
-    if: ${{ !github.event.repository.private }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.repository.private && 'tailnet-unlock' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -26,14 +25,12 @@ jobs:
           fi
 
   full:
-    if: ${{ !github.event.repository.private }}
     needs: on-main
     uses: ./.github/workflows/full.yml
 
   release:
-    if: ${{ !github.event.repository.private }}
     needs: full
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.repository.private && 'tailnet-unlock' || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: write
