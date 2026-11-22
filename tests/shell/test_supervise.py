@@ -188,3 +188,66 @@ def test_no_retry_without_a_container(
     time.sleep(6)
     assert (box.run / "seal").read_text().strip() == "no-container"
     assert len(pids(box)) == 1
+
+
+def net_conf_box(tmp_path: Path, conf: str) -> Sandbox:
+    """A box whose uplink is set up with the given net-<device>.conf, as ipconfig writes it."""
+    box = door_box(tmp_path)
+    (box.root / "conf-text").write_text(conf.replace("@ROOT@", str(box.root)))
+    (box.root / "functions").write_text(
+        "configure_networking() {\n"
+        "\tDEVICE=tutest0\n"
+        f"\tcp '{box.root}/conf-text' '{box.root}/netconf/net-tutest0.conf'\n"
+        "}\n"
+    )
+    return box
+
+
+def uplink_line(box: Sandbox) -> str:
+    wait_until(lambda: "uplink " in box.console.read_text())
+    (line,) = [line for line in box.console.read_text().splitlines() if "] uplink " in line]
+    return line.split("] uplink ", 1)[1]
+
+
+def test_the_uplink_address_and_device_come_from_the_net_conf(
+    tmp_path: Path, shell: Shell, running: list[tuple[subprocess.Popen[bytes], Sandbox]]
+) -> None:
+    box = net_conf_box(
+        tmp_path,
+        "DEVICE='eth9'\nIPV4ADDR='192.0.2.7'\nIPV4DNS0='192.0.2.1'\nHOSTNAME='web-1'\n",
+    )
+    process = start_supervisor(box, shell)
+    running.append((process, box))
+    assert uplink_line(box) == "eth9 192.0.2.7"
+    assert (box.run / "uplink_device").read_text().strip() == "eth9"
+
+
+HOSTILE_NET_CONFS = {
+    "substitution": "DEVICE='$(touch @ROOT@/pwned)'\nIPV4ADDR='$(touch @ROOT@/pwned)'\n",
+    "semicolons": "DEVICE='x'; touch @ROOT@/pwned\nIPV4ADDR='192.0.2.7'; touch @ROOT@/pwned\n",
+    "quote-break": "DEVICE=''; touch @ROOT@/pwned; '\nIPV4ADDR=''; touch @ROOT@/pwned; '\n",
+    "backticks": "DEVICE=`touch @ROOT@/pwned`\nIPV4ADDR=`touch @ROOT@/pwned`\n",
+    "other-lines": "HOSTNAME='$(touch @ROOT@/pwned)'\nROOTPATH='a'; touch @ROOT@/pwned\n"
+    "DEVICE='eth9'\nIPV4ADDR='192.0.2.7'\n",
+    "newline-in-value": "IPV4ADDR='192.0.2.7\ntouch @ROOT@/pwned\n'\nDEVICE='eth9\n",
+}
+
+
+@pytest.mark.parametrize("name", sorted(HOSTILE_NET_CONFS))
+def test_a_hostile_net_conf_is_read_never_run(
+    tmp_path: Path,
+    shell: Shell,
+    running: list[tuple[subprocess.Popen[bytes], Sandbox]],
+    name: str,
+) -> None:
+    box = net_conf_box(tmp_path, HOSTILE_NET_CONFS[name])
+    process = start_supervisor(box, shell)
+    running.append((process, box))
+    line = uplink_line(box)
+    assert not (box.root / "pwned").exists()
+    if name == "other-lines":
+        assert line == "eth9 192.0.2.7"
+    else:
+        # nothing of the hostile values is taken: the address is absent, the device is the one
+        # configure_networking reported
+        assert line == "tutest0 without an address"

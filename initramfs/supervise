@@ -79,6 +79,19 @@ wait_for_tpm() {
 
 uplink_address=''
 uplink_device=''
+
+# ipconfig writes net-<device>.conf from what the DHCP server sent, so the file is read here and
+# never sourced: only the two values the supervisor needs are taken, and only when they have the
+# shape of a dotted address or an interface name. Anything else counts as absent.
+ADDRESS_PATTERN='[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*'
+DEVICE_PATTERN='[A-Za-z0-9_.-][A-Za-z0-9_.-]*'
+
+# net_conf_value <file> <variable> <pattern>: the first VAR='value' (or VAR=value) line whose whole
+# value matches the pattern, else nothing.
+net_conf_value() {
+	sed -n -e "s/^$2='\($3\)'\$/\1/p" -e "s/^$2=\($3\)\$/\1/p" "$1" | sed -n 1p
+}
+
 bring_up_uplink() {
 	# configure_networking and its helpers come from initramfs-tools
 	# shellcheck disable=SC1090 # initramfs-tools' scripts/functions, at boot only
@@ -90,11 +103,16 @@ bring_up_uplink() {
 	configure_networking >/dev/null 2>&1 || :
 	for conf in "$TU_NET_CONF_DIR/net-${DEVICE-}.conf" "$TU_NET_CONF_DIR"/net-*.conf; do
 		[ -r "$conf" ] || continue
-		IPV4ADDR=''
-		# shellcheck disable=SC1090 # ipconfig's own output, written at boot
-		. "$conf"
-		uplink_address=${IPV4ADDR-}
-		uplink_device=${DEVICE-}
+		uplink_address=$(net_conf_value "$conf" IPV4ADDR "$ADDRESS_PATTERN")
+		uplink_device=$(net_conf_value "$conf" DEVICE "$DEVICE_PATTERN")
+		# a device the conf does not name (or names in a shape nothing uses) is the one
+		# configure_networking reported
+		if [ -z "$uplink_device" ]; then
+			case ${DEVICE-} in
+			'' | *[!A-Za-z0-9_.-]*) ;;
+			*) uplink_device=$DEVICE ;;
+			esac
+		fi
 		break
 	done
 	record uplink_device "$uplink_device"
