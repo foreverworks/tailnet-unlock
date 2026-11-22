@@ -8,7 +8,7 @@ backend = "zfs"              # "zfs"; "luks" from M7
 port = 2222
 key_source = "generate"      # or "import": door-keygen --import - reads a key you provision
 # recovery = "uplink"        # "off", "uplink" or "uplink+tailnet";
-                             # unset: "uplink" under the tpm profile, "off" under measured
+                             # unset: "uplink"
 recovery_key_source = "generate"
 idle_timeout_seconds = 600
 
@@ -28,7 +28,7 @@ hostname = ""                # empty: "<host>-unlock"
 tags = ["tag:unlock"]
 
 [seal]
-profile = "tpm"              # "tpm"; "measured" from M6
+profile = "tpm"              # the only profile so far; "measured" is planned and refused
 
 # [rehearsal]
 # minutes = 10               # set by enroll, cleared by commit

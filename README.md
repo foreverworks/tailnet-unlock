@@ -96,7 +96,7 @@ host key, so you can still unlock it over the network.
 
 - **That second key is on `/boot` unsealed.** A copy of `/boot` can present the recovery door to anyone
   who can reach it.
-- **In the `measured` profile, any change to what boots lands the box in recovery, on purpose.** That
+- **In the planned `measured` profile, any change to what boots lands the box in recovery, on purpose.** That
   includes a change someone made to `/boot` to steal your key. The default profile is different: its
   sealed key opens whatever boots, so a modified `/boot` opens the sealed door itself (the gap named in
   the security model below), and recovery means the sealed key did not open at all. In both profiles,
@@ -106,7 +106,8 @@ host key, so you can still unlock it over the network.
 - Automated delivery refuses the recovery door unless you turn that on and your approver confirms, as
   a separate decision, that it is the recovery door.
 - It listens on the box's own address only, never on the tailnet unless you enable that. It is on by
-  default in the default profile and off by default in the `measured` profile (below).
+  default in the default profile, and is planned to be off by default in the `measured` profile
+  (below).
 
 ## What you will get
 

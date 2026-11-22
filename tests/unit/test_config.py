@@ -1,6 +1,6 @@
 import pytest
 
-from tailnet_unlock.config import parse_box_config, unlock_hostname
+from tailnet_unlock.config import default_recovery, parse_box_config, unlock_hostname
 from tailnet_unlock.errors import ConfigError
 
 MINIMAL = '[network]\ninterface = "eno1"\n'
@@ -22,8 +22,13 @@ def test_defaults() -> None:
 
 
 def test_recovery_defaults_off_under_measured() -> None:
-    config = parse_box_config(MINIMAL + '[seal]\nprofile = "measured"\n')
-    assert config.door.recovery == "off"
+    assert default_recovery("measured") == "off"
+    assert default_recovery("tpm") == "uplink"
+
+
+def test_the_measured_profile_is_refused_until_it_is_built() -> None:
+    with pytest.raises(ConfigError, match=r"measured.*not supported yet"):
+        parse_box_config(MINIMAL + '[seal]\nprofile = "measured"\n')
 
 
 def test_static_network() -> None:

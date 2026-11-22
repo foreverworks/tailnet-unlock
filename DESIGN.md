@@ -1036,7 +1036,7 @@ backend = "zfs"            # "zfs"; "luks" from M7
 port = 2222
 key_source = "generate"    # or "import": `enroll --door-key-file -` reads a key you provision
 # recovery = "uplink"      # "off", "uplink" or "uplink+tailnet";
-                           # unset: "uplink" under the tpm profile, "off" under measured
+                           # unset: "uplink" under the tpm profile ("off" under measured, once built)
 recovery_key_source = "generate"
 idle_timeout_seconds = 600
 
@@ -1055,7 +1055,7 @@ hostname = ""              # empty: "<host>-unlock"
 tags = ["tag:unlock"]
 
 [seal]
-profile = "tpm"            # "tpm" or "measured"
+profile = "tpm"            # "tpm"; "measured" is refused until it is built (M6)
 
 [rehearsal]
 minutes = 10               # set by `enroll`, cleared by `commit`
@@ -1313,6 +1313,9 @@ available to pull requests from forks. Debian 14 runs use initramfs-tools until 
 | M7 | The LUKS backend | T23 (LUKS) |
 
 Order after 0.1: M5, then M6, then M7 (section 19).
+
+Until M6 is built, `seal.profile = "measured"` is refused by the configuration: an image sealed under
+it has no door, so accepting it would leave a box that reboots forever on an initramfs panic.
 
 **Where M1 stands.** Built and passing in the Debian 13 test container: `door-keygen` and `seal`
 (`generate` and `import`, the recovery key's import), the container, the unseal, the door and its

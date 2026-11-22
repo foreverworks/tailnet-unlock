@@ -29,6 +29,9 @@ type NetworkMode = Literal["dhcp", "static"]
 type Match = Literal["name", "mac"]
 
 PROFILES: tuple[Profile, ...] = ("tpm", "measured")
+# Named in the design and known to the initramfs scripts, but not built: an image sealed under one
+# has no door, so the configuration refuses it instead of producing a box that cannot be reached.
+UNSUPPORTED_PROFILES: tuple[Profile, ...] = ("measured",)
 RECOVERIES: tuple[Recovery, ...] = ("off", "uplink", "uplink+tailnet")
 KEY_SOURCES: tuple[KeySource, ...] = ("generate", "import")
 NETWORK_MODES: tuple[NetworkMode, ...] = ("dhcp", "static")
@@ -123,8 +126,12 @@ def _root(value: object) -> Literal["zfs"]:
 def _seal(value: object) -> Profile:
     table = as_table(value, "seal", ConfigError)
     only_keys(table, ("profile",), "seal", ConfigError)
-    profile = get_str(table, "profile", "tpm", "seal", ConfigError)
-    return one_of(profile, PROFILES, "seal.profile", ConfigError)
+    profile = one_of(
+        get_str(table, "profile", "tpm", "seal", ConfigError), PROFILES, "seal.profile", ConfigError
+    )
+    if profile in UNSUPPORTED_PROFILES:
+        raise ConfigError(f'seal.profile = "{profile}" is not supported yet; use "tpm"')
+    return profile
 
 
 def _door(value: object, profile: Profile) -> DoorConfig:
