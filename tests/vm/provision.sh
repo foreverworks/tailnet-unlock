@@ -4,6 +4,13 @@
 # encrypted rpool on the rest, with Debian 13 from trixie main and contrib and tailnet-unlock from
 # the repository archive on the seed. Every secret here is a made-up test value from the seed.
 set -eux
+# Everything mounts inside a private mount namespace: a service that starts meanwhile and has its
+# own namespace would otherwise copy the pool's mounts, and the pool could not be exported.
+if [ -z "${TU_PRIVATE_NS-}" ]; then
+	TU_PRIVATE_NS=1
+	export TU_PRIVATE_NS
+	exec unshare --mount --propagation private sh "$0"
+fi
 seed=/run/tailnet-unlock-seed
 mkdir -p "$seed"
 mount -o ro /dev/disk/by-label/CIDATA "$seed" 2>/dev/null || mount -o ro LABEL=CIDATA "$seed"
