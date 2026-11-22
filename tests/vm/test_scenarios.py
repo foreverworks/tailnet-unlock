@@ -430,7 +430,7 @@ def test_t6_t21_boot_holds_no_plaintext_door_key(guest: Guest, boot: Boot) -> No
         booted,
         "sh -c 'for i in /boot/initrd.img-*; do d=$(mktemp -d); "
         'unmkinitramfs $i $d; find $d -type f -exec xxd -p {} + | tr -d "\\n" | '
-        f"grep -c {seed}; ls $d/main/etc/tailnet-unlock 2>/dev/null; done'",
+        f"grep -c {seed}; find $d -name recovery_host_key; done'",
     )
     assert b"recovery_host_key" in found.stdout
     assert re.search(rb"^[1-9]", found.stdout, re.MULTILINE) is None
