@@ -126,8 +126,11 @@ def build_guest() -> Guest:
     run(["git", "-C", str(REPO), "archive", "-o", str(seed / "repo.tar"), "HEAD"])
     (seed / "meta-data").write_text("instance-id: tailnet-unlock-builder\n")
     (seed / "user-data").write_text(
-        '#cloud-config\nruncmd:\n  - [sh, -c, "mkdir -p /run/s && mount -o ro LABEL=CIDATA '
-        '/run/s && sh /run/s/provision.sh >/dev/ttyS0 2>&1"]\n'
+        "#cloud-config\nruncmd:\n"
+        '  - [sh, -c, "mkdir -p /run/s && mount -o ro LABEL=CIDATA /run/s && '
+        "{ tail -n +1 -F /var/log/tu-provision.log >/dev/ttyS0 2>&1 & }; "
+        "sh /run/s/provision.sh >/var/log/tu-provision.log 2>&1; rc=$?; sleep 3; "
+        'echo TU-PROVISION rc=$rc >/dev/ttyS0"]\n'
     )
     builder_disk = cache / "builder.qcow2"
     run(
@@ -163,7 +166,9 @@ def build_guest() -> Guest:
     )
     vm = start(builder)
     try:
-        expect(vm.console, r"TU-PROVISION done", 3600)
+        # the log is tailed to the console; a failed run ends with `TU-PROVISION rc=<n>`
+        outcome = expect(vm.console, r"TU-PROVISION (done|rc=\d+)", 3600)
+        assert outcome.group(1) == "done", f"the builder's provision.sh failed: {outcome.group(0)}"
         vm.qemu.wait(timeout=300)
     finally:
         stop(vm)

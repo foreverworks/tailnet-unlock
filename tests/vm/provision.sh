@@ -107,4 +107,6 @@ for d in dev proc sys run; do umount -R "/mnt/$d"; done
 umount /mnt/boot/efi /mnt/boot
 zpool export rpool
 echo "TU-PROVISION done"
+# the log is tailed to the console: give the tail time to print the line before the power goes
+sleep 5
 poweroff
