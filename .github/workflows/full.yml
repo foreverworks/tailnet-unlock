@@ -12,7 +12,7 @@ permissions:
   contents: read
 jobs:
   unit:
-    # a fork's pull request never reaches the fleet's runners (it exists only once the repository
+    # a fork's pull request never reaches a self-hosted runner (it exists only once the repository
     # is public, and then the jobs run on GitHub's)
     if: ${{ !github.event.repository.private || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ github.event.repository.private && 'tailnet-unlock' || 'ubuntu-latest' }}
@@ -35,7 +35,7 @@ jobs:
           version: "0.13.9"
           enable-cache: false
       - name: Python ${{ matrix.python }}
-        # uv, not setup-python: the fleet's runners are Debian VMs, which setup-python has no builds for
+        # uv, not setup-python: the self-hosted runners are Debian VMs, which setup-python has no builds for
         run: |
           uv python install ${{ matrix.python }}
           uv venv --python ${{ matrix.python }} "$RUNNER_TEMP/venv"
@@ -45,7 +45,7 @@ jobs:
       - run: make unit PYTHON=python
 
   container:
-    # a fork's pull request never reaches the fleet's runners (it exists only once the repository
+    # a fork's pull request never reaches a self-hosted runner (it exists only once the repository
     # is public, and then the jobs run on GitHub's)
     if: ${{ !github.event.repository.private || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ github.event.repository.private && 'tailnet-unlock' || 'ubuntu-latest' }}
@@ -67,7 +67,7 @@ jobs:
       - run: make test BUILD_ARGS="${{ matrix.build_args }}" IMAGE=tailnet-unlock-test:debian-${{ matrix.debian }}
 
   vm:
-    # a fork's pull request never reaches the fleet's runners (it exists only once the repository
+    # a fork's pull request never reaches a self-hosted runner (it exists only once the repository
     # is public, and then the jobs run on GitHub's)
     if: ${{ !github.event.repository.private || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ github.event.repository.private && 'tailnet-unlock-kvm' || 'ubuntu-latest' }}

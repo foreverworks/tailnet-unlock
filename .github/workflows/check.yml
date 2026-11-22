@@ -1,7 +1,7 @@
 # One job on every push and pull request: shellcheck, mypy, ruff, the ignore check and the unit
 # tests (the busybox and dash tests included) on the newest stable Python, 3.15.2 (python.org,
-# read 2026-11-21). While the repository is private the job runs on the fleet's runners (label
-# tailnet-unlock); once it is public, on GitHub's.
+# read 2026-11-21). The job runs on self-hosted runners (label tailnet-unlock) while the
+# repository is private, and on GitHub's otherwise.
 name: check
 on:
   push:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 jobs:
   check:
-    # a fork's pull request never reaches the fleet's runners (it exists only once the repository
+    # a fork's pull request never reaches a self-hosted runner (it exists only once the repository
     # is public, and then the jobs run on GitHub's)
     if: ${{ !github.event.repository.private || github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ${{ github.event.repository.private && 'tailnet-unlock' || 'ubuntu-latest' }}
@@ -24,7 +24,7 @@ jobs:
           version: "0.13.9"
           enable-cache: false
       - name: Python 3.15.2
-        # uv, not setup-python: the fleet's runners are Debian VMs, which setup-python has no builds for
+        # uv, not setup-python: the self-hosted runners are Debian VMs, which setup-python has no builds for
         run: |
           uv python install 3.15.2
           uv venv --python 3.15.2 "$RUNNER_TEMP/venv"

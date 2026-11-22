@@ -1225,8 +1225,8 @@ unit` is what CI's check job runs.
 | Release | a version tag | the full matrix and the VM scenarios on every supported Debian release (13 and 14), all required, plus the VM scenarios against a throwaway Tailscale tailnet (an OAuth client in the repository's secrets, scoped to auth keys for a test tag); then the release assets are built | GitHub-hosted runners |
 | Hardware | before each release, by hand | the scenarios that need real hardware on one machine with a discrete TPM and one with a firmware TPM; results in the release notes | the maintainer's machines |
 
-Every workflow job carries `if: ${{ !github.event.repository.private }}`, so nothing runs on hosted
-runners while the repository is private; until then the local runs are the checks. Secrets are never
+Every workflow job runs on self-hosted runners while the repository is private and on GitHub-hosted
+runners otherwise, and a fork's pull request never reaches a self-hosted runner. Secrets are never
 available to pull requests from forks. Debian 14 runs use initramfs-tools until the dracut module (M5).
 
 ### 15.2 The VM harness
@@ -1385,7 +1385,7 @@ tools are pinned to the upstream versions above in pre-commit and CI.
 | D25 | Automated delivery refuses the recovery door unless `allow_recovery_delivery = true` and the approver acknowledges the recovery role | The recovery key is on `/boot` in plain text; sending to it must be a separate, explicit human decision. |
 | D26 | Door material wiped on every exit path; no initramfs shell under `measured` (`tailnet-unlock.noshell` in the UKI command line, and our panic script wipes, then reboots and never returns); never `panic=` | A shell inside a genuine initramfs, after the unseal, would hand out the sealed key; under `measured` that is the attack the profile exists to stop. `panic=` would deny the shell too, but initramfs-tools 0.148.4 then reboots before any panic script runs, so nothing would wipe. |
 | D27 | Separate delivery keys (`restrict`) and operator keys (`no-port-forwarding,no-agent-forwarding,no-X11-forwarding`); the role set by the key line | People need a terminal for the no-echo prompt; automation needs nothing, so it gets nothing. |
-| D28 | CI: one check job on every push and pull request; the full matrix weekly; releases gated by the full matrix and the VM scenarios on Debian 13 and 14; no hosted job while the repository is private | Fast feedback for each change, the expensive runs where they matter, and nothing spent before the project is public. |
+| D28 | CI: one check job on every push and pull request; the full matrix weekly; releases gated by the full matrix and the VM scenarios on Debian 13 and 14; no GitHub-hosted job while the repository is private | Fast feedback for each change, the expensive runs where they matter, and nothing spent on hosted runners before the project is public. |
 | D29 | `prerm` refuses removal while the box is enrolled | Removing the hooks would leave the next initramfs without a door. |
 | D30 | TPM 2.0 is a hard requirement; no mode without it | Without a TPM the door's identity is plain text on `/boot`, which is the problem this project exists to fix. |
 | D31 | The keyholder derives the door's role only from the host key its SSH client verified, one pin per known-hosts file; the recovery pin is used only with `allow_recovery_delivery = true` or `unlock --recovery` | A copy of `/boot` holds the recovery key unsealed and can report anything about itself, including "sealed". |
