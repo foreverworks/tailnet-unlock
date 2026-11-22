@@ -78,11 +78,9 @@ jobs:
           persist-credentials: false
       - name: KVM is usable by the runner user
         run: |
-          if [ ! -w /dev/kvm ]; then
-            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
-              sudo tee /etc/udev/rules.d/99-kvm.rules >/dev/null || true
-            sudo udevadm control --reload-rules || true
-            sudo udevadm trigger --name-match=kvm || true
+          if [ -c /dev/kvm ] && [ ! -w /dev/kvm ]; then
+            # a fresh VM: /dev/kvm is root:kvm 0660 and the runner user is not in the kvm group
+            sudo chmod 0666 /dev/kvm || true
           fi
           if [ ! -c /dev/kvm ]; then
             echo "::error::/dev/kvm does not exist on this runner: the VM scenarios need KVM"

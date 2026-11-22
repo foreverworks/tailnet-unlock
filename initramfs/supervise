@@ -35,22 +35,19 @@ supervise_stop() {
 	exit 0
 }
 
-# A TERM that arrives between starting a daemon and holding its PID waits until it is held, so
-# the daemon is never left running unrecorded.
-in_spawn=0
+# The TERM handler only records the request; the supervisor stops at the next safe point
+# (check_stop), never between starting a daemon and holding its PID, so the daemon is never left
+# running unrecorded. Doing the work inside the handler hangs busybox 1.38, which cannot fork a
+# command substitution from a trap that interrupted `wait`.
 stop_pending=0
 on_term() {
-	if [ "$in_spawn" = 1 ]; then
-		stop_pending=1
-		return 0
-	fi
-	supervise_stop
+	stop_pending=1
 }
-spawn_done() {
-	in_spawn=0
+check_stop() {
 	if [ "$stop_pending" = 1 ]; then
 		supervise_stop
 	fi
+	return 0
 }
 trap on_term TERM
 trap '' HUP INT
@@ -59,11 +56,13 @@ trap '' HUP INT
 nap() {
 	sleep "$1" &
 	wait $! 2>/dev/null || :
+	check_stop
 }
 
 uptime_seconds() {
-	up=''
-	read -r up _ 2>/dev/null </proc/uptime || up=0
+	# not `read`: see lib.sh
+	up=$(head -n 1 2>/dev/null </proc/uptime) || up=0
+	up=${up%% *}
 	printf '%s' "${up%%.*}"
 }
 
@@ -150,13 +149,12 @@ launch_dropbear() {
 		return 1
 	fi
 	rm -f "$TU_RUN/dropbear.pid"
-	in_spawn=1
 	# shellcheck disable=SC2086 # $listen holds separate -p arguments on purpose
 	dropbear -F -E -r "$door_key_path" $listen -s -j -k -I "$TU_IDLE_TIMEOUT" \
 		-P "$TU_RUN/dropbear.pid" </dev/null >/dev/null 2>&1 &
 	dropbear_pid=$!
 	record dropbear.child "$dropbear_pid"
-	spawn_done
+	check_stop
 	# dropbear keeps its host key in memory: once it has written its PID file the plaintext
 	# door key can go (DESIGN.md 7.3 step 2.4)
 	waited=0
@@ -218,13 +216,12 @@ tailnet_wanted() {
 start_tailscaled() {
 	tailnet_wanted || return 1
 	[ -e "$TU_RUN/unlock.state" ] || cp "$TU_ETC/unlock.state" "$TU_RUN/unlock.state" || return 1
-	in_spawn=1
 	/usr/sbin/tailscaled --state="$TU_RUN/unlock.state" --encrypt-state \
 		--tun=userspace-networking --socket="$TU_RUN/tailscaled.sock" --no-logs-no-support \
 		</dev/null >/dev/null 2>&1 &
 	tailscaled_pid=$!
 	record tailscaled.child "$tailscaled_pid"
-	spawn_done
+	check_stop
 }
 
 summary() {
@@ -309,12 +306,15 @@ if tu_noshell; then
 	printf '10\n' >"$TU_KERNEL_PANIC" 2>/dev/null || :
 fi
 wait_for_tpm || tu_log "no TPM at $TU_TPM_DEVICE after 10 seconds"
+check_stop
 bring_up_uplink
+check_stop
 tu_log "uplink ${uplink_device:-none} ${uplink_address:-without an address}"
 if ! start_dropbear; then
 	tu_log "no door this boot: seal $(tu_get seal), recovery ${TU_RECOVERY}; the console prompt" \
 		"remains"
 fi
+check_stop
 start_tailscaled || :
 summary
 supervise_loop

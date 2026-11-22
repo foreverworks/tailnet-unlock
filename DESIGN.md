@@ -280,10 +280,12 @@ package) into the image.
       state copy. Each restart is printed on the console and counted, and the door's `status`
       reports the counts (`restarts`). A daemon that cannot start at all (the unseal now fails, the
       binary is gone) is retried at the longest backoff and reported, never given up on silently.
-      The supervisor's TERM handler is the one place that stops the daemons and wipes (step 5 and
+      The supervisor's TERM handling is the one place that stops the daemons and wipes (step 5 and
       the exit paths below). It stops them from the PIDs it holds in memory as well as from the
-      state files, and a TERM that arrives while a daemon is being started waits until the daemon's
-      PID is held, so neither a missing record nor a restart in progress leaves an orphan. A PID is
+      state files. The handler only records the request and the supervisor stops at its next
+      safe point (never between starting a daemon and holding its PID), and the scripts read files
+      with `head`, not `read`: busybox 1.38 (Debian 14) spins in `read` once the shell has caught a
+      signal. Neither a missing record nor a restart in progress leaves an orphan. A PID is
       only signalled while the process's command line still names the daemon (`dropbear`,
       `tailscaled`, `supervise`): PIDs are reused, and a number read from a file may belong to
       something else by then.

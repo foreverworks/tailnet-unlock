@@ -1,11 +1,15 @@
 # shellcheck shell=sh
 # Functions shared by the door, the supervisor and the boot scripts. POSIX sh: busybox ash at boot,
 # dash and busybox in the tests. Source paths.sh first.
+#
+# Files are read with `$(head -n 1 ...)`, not the `read` builtin: in busybox 1.38 (Debian 14) a
+# `read` run after the shell has caught a signal spins forever, and the supervisor reads state
+# after its TERM handler has run. `head` is already in the initramfs (the door uses it).
 
 # One line on the console, never fatal, with the seconds since boot.
 tu_log() {
-	tu_up=''
-	read -r tu_up _ 2>/dev/null </proc/uptime || :
+	tu_up=$(head -n 1 2>/dev/null </proc/uptime) || :
+	tu_up=${tu_up%% *}
 	printf 'tailnet-unlock: [%s] %s\n' "${tu_up:-?}" "$*" 2>/dev/null >>"$TU_CONSOLE" || :
 }
 
@@ -35,7 +39,7 @@ tu_jlist() {
 # The first line of a file in the run directory, or empty.
 tu_get() {
 	tu_line=''
-	[ -r "$TU_RUN/$1" ] && IFS= read -r tu_line <"$TU_RUN/$1"
+	[ -r "$TU_RUN/$1" ] && tu_line=$(head -n 1 2>/dev/null <"$TU_RUN/$1")
 	printf '%s' "$tu_line"
 }
 
@@ -58,16 +62,15 @@ tu_count() {
 }
 
 tu_boot_id() {
-	tu_id=''
-	IFS= read -r tu_id 2>/dev/null <"$TU_BOOT_ID_FILE"
+	tu_id=$(head -n 1 2>/dev/null <"$TU_BOOT_ID_FILE") || :
 	printf '%s' "$tu_id"
 }
 
 # The state and parent of a process from /proc/<pid>/stat, as "<state> <ppid>". The command name
 # sits in parentheses and may hold spaces, so the fields are read after the last ") ".
 tu_stat() {
-	tu_line=''
-	IFS= read -r tu_line 2>/dev/null <"/proc/$1/stat" || return 1
+	tu_line=$(head -n 1 2>/dev/null <"/proc/$1/stat") || return 1
+	[ -n "$tu_line" ] || return 1
 	tu_rest=${tu_line##*) }
 	tu_st=${tu_rest%% *}
 	tu_rest=${tu_rest#* }
@@ -170,8 +173,7 @@ tu_stop_supervisor() {
 # line, so an image without a valid configuration still keeps the shell shut.
 tu_noshell() {
 	[ "${TU_PROFILE-}" = measured ] && return 0
-	tu_words=''
-	read -r tu_words 2>/dev/null <"$TU_CMDLINE" || :
+	tu_words=$(head -n 1 2>/dev/null <"$TU_CMDLINE") || :
 	case " $tu_words " in
 	*" tailnet-unlock.noshell "* | *" tailnet-unlock.noshell=1 "*) return 0 ;;
 	esac
