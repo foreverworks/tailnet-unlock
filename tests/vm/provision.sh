@@ -40,7 +40,7 @@ cp /etc/apt/sources.list.d/debian.sources /mnt/etc/apt/sources.list.d/
 sed -i "s#mirror+file:/*etc/apt/mirrors/debian.list#http://deb.debian.org/debian#; s#mirror+file:/*etc/apt/mirrors/debian-security.list#http://deb.debian.org/debian-security#" \
 	/mnt/etc/apt/sources.list.d/debian.sources
 rm -f /mnt/etc/apt/sources.list
-for d in dev proc sys run; do mount --rbind "/$d" "/mnt/$d"; done
+for d in dev proc sys run; do mount --rbind "/$d" "/mnt/$d" && mount --make-rslave "/mnt/$d"; done
 install -D -m 0600 /run/rpool.key /mnt/etc/zfs/rpool.key
 cat >/mnt/etc/fstab <<EOF
 LABEL=boot /boot ext4 defaults 0 2
@@ -108,7 +108,7 @@ ln -sf /etc/systemd/system/tailnet-unlock-firstboot.service \
 	/etc/systemd/system/multi-user.target.wants/
 update-initramfs -u -k all
 EOF
-for d in dev proc sys run; do umount -R "/mnt/$d"; done
+for d in dev proc sys run; do umount -R -l "/mnt/$d"; done
 umount /mnt/boot/efi /mnt/boot
 zpool export rpool
 echo "TU-PROVISION done"
