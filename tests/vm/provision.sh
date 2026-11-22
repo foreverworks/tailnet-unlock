@@ -64,7 +64,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends linux-image-amd64 linux-headers-amd64 zfs-dkms \
 	zfs-initramfs zfsutils-linux grub-efi-amd64 dropbear-bin tpm2-tools \
-	libtss2-tcti-device0t64 python3 openssh-server busybox initramfs-tools systemd-sysv
+	libtss2-tcti-device0t64 python3 openssh-server busybox initramfs-tools systemd-sysv xxd
 /opt/tailnet-unlock/tools/install-tree /
 zfs set keylocation=file:///etc/zfs/rpool.key rpool
 echo 'GRUB_CMDLINE_LINUX="console=ttyS0,115200 root=ZFS=rpool/ROOT/debian"' \
@@ -111,6 +111,16 @@ ExecStart=/bin/sh -c 'echo "TU-SCENARIO boot.json $(cat /run/tailnet-unlock/boot
 [Install]
 WantedBy=multi-user.target
 UNIT
+# a debootstrap system has no network configuration, and the initramfs flushes the address it set
+# (DESIGN.md 7.3), so the scenarios' ssh into the booted guest needs the guest to ask for its own
+mkdir -p /etc/systemd/network
+cat >/etc/systemd/network/20-uplink.network <<'NET'
+[Match]
+Name=en*
+[Network]
+DHCP=ipv4
+NET
+systemctl enable systemd-networkd.service
 systemctl enable tailnet-unlock-firstboot.service tailnet-unlock-report.service ssh.service
 mkdir -p /etc/systemd/system/multi-user.target.wants
 ln -sf /etc/systemd/system/tailnet-unlock-firstboot.service \
