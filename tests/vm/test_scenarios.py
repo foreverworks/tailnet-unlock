@@ -307,26 +307,31 @@ def door(
 
 
 def guest_ssh(guest: Guest, booted: Booted, command: str) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(
-        [
-            "ssh",
-            "-p",
-            str(booted.ssh_port),
-            "-i",
-            str(guest.keys / "harness_ssh"),
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "root@127.0.0.1",
-            command,
-        ],
-        capture_output=True,
-        timeout=300,
-        check=False,
-    )
+    """Run a command on the booted system as root, waiting for its sshd (it starts after the
+    boot record is printed, so the first tries may be refused: ssh exits 255 for those)."""
+    argv = [
+        "ssh",
+        "-p",
+        str(booted.ssh_port),
+        "-i",
+        str(guest.keys / "harness_ssh"),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=10",
+        "root@127.0.0.1",
+        command,
+    ]
+    deadline = time.monotonic() + 180
+    while True:
+        completed = subprocess.run(argv, capture_output=True, timeout=300, check=False)
+        if completed.returncode != 255 or time.monotonic() > deadline:
+            return completed
+        time.sleep(3)
 
 
 def wait_for_door(guest: Guest, booted: Booted, role: str) -> tuple[str, str]:
