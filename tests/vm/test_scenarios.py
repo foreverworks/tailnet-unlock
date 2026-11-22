@@ -131,6 +131,7 @@ def build_guest() -> Guest:
         '  - [sh, -c, "mkdir -p /run/s && mount -o ro LABEL=CIDATA /run/s && '
         "{ tail -n +1 -F /var/log/tu-provision.log >/dev/ttyS0 2>&1 & }; "
         "sh /run/s/provision.sh >/var/log/tu-provision.log 2>&1; rc=$?; sleep 3; "
+        "tail -n 25 /var/log/tu-provision.log >/dev/ttyS0; "
         'echo TU-PROVISION rc=$rc >/dev/ttyS0"]\n'
     )
     builder_disk = cache / "builder.qcow2"
