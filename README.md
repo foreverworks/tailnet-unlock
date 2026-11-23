@@ -12,9 +12,9 @@ you control.
 > **Status: unfinished, and not for a machine you cannot reach.** There is no release and no
 > package. The repository holds the design ([DESIGN.md](DESIGN.md)) and the first parts of it, with
 > their tests: sealing the door's key to the TPM, the door itself, the initramfs hook and the boot
-> scripts. The pieces that make it usable are not written yet: `enroll`, the safe test reboot
-> (rehearsal), `deliver`, `unlock`, `watch`, `verify`, and the Debian packages. Without them you
-> cannot set up a real box end to end. Most of this page describes what is planned, and says so.
+> scripts, and `enroll`, `verify`, `status` and `disable --tailnet` for the tailnet node. The pieces
+> that make it usable are not written yet: the safe test reboot (rehearsal), `deliver`, `unlock`,
+> `watch`, and the Debian packages. Without them you cannot set up a real box end to end. Most of this page describes what is planned, and says so.
 > What is built and what is not is listed in the [table in section 16 of DESIGN.md](DESIGN.md#16-what-is-built-and-planned-and-in-what-order).
 
 **The risk, plainly.** This software runs in early boot, before your system is up, and sits between
@@ -173,8 +173,9 @@ read each as what the design promises, not as something to rely on today.
 
 1. **Early boot opens a door.** The initramfs brings up the network, starts a minimal SSH server and a
    Tailscale node of its own, `<host>-unlock`. The door answers on your tailnet and on the box's own
-   address. Behind NAT, the tailnet is how you reach it. The SSH server and the network are built;
-   the tailnet node's identity is not, because `enroll` is not written.
+   address. Behind NAT, the tailnet is how you reach it. The SSH server, the network and `enroll`,
+   which gives the node its identity, are built; the real join on a TPM has only been run in tests
+   with stand-ins, not on hardware.
 2. **The door can only do one thing.** Every login runs one command: report its status, or accept a
    key. No shell, no forwarding, keys only. Built.
 3. **The door's identity is sealed to the TPM.** Its SSH host key and its tailnet node keys are
@@ -232,9 +233,10 @@ Each item says whether it exists in the repository today.
 
 - initramfs-tools integration for Debian 13: built. A dracut module for Debian 14: not built.
 - The ZFS backend: built. LUKS, with the same door: not built.
-- A `tailnet-unlock` command on the box: `door-keygen`, `seal`, `render-initramfs`, `pins` and
-  `fingerprint` are built. `enroll`, the **rehearsal** reboot that falls back to your old key if
-  anything goes wrong, `commit`, `rotate`, `disable` and `verify` are not.
+- A `tailnet-unlock` command on the box: `door-keygen`, `seal`, `render-initramfs`, `pins`,
+  `fingerprint`, `enroll` (the unlock node), `verify`, `status` and `disable --tailnet` are built.
+  The **rehearsal** reboot that falls back to your old key if anything goes wrong, `commit`,
+  `rotate` and the rest of `disable` are not.
 - A keyholder: `unlock` for you at a terminal, `deliver` for automation, `watch` to notice a box
   waiting at its door after a reboot nobody planned. Not built; the door's side of delivery is.
 - A small, documented approver contract (JSON in, JSON out): the contract is built as code and

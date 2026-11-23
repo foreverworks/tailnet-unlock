@@ -1097,9 +1097,53 @@ uplink = "192.0.2.10"
 ### 12.5 Commands
 
 Box: `enroll`, `commit`, `status`, `verify [--next-boot]`, `reseal [--profile P] [--next-boot-only]`,
-`rotate`, `disable [--tailnet|--local-key|--console]`, `door-keygen` and `seal` (the building
-blocks `enroll` will call), `render-initramfs` (used by the hook), `pins` and `fingerprint`.
-Built today: `door-keygen`, `seal`, `render-initramfs`, `pins` and `fingerprint`. The rest are planned.
+`rotate`, `disable [--tailnet|--local-key|--console]`, `door-keygen` and `seal` (the door's keys,
+which `enroll` does not make), `render-initramfs` (used by the hook), `pins` and `fingerprint`.
+Built today: `door-keygen`, `seal`, `render-initramfs`, `pins`, `fingerprint` and, for the
+tailnet node, `enroll`, `verify`, `status` and `disable --tailnet`. The rest are planned.
+
+The built ones, in the form release 0.1 has them (every one exits 2 with `tailnet-unlock: <message>`
+on a usage, configuration or tool error):
+
+- `enroll --auth-key-file FILE [--replace] [--no-rebuild] [--timeout SECONDS]` enrolls the unlock
+  node only; the door's keys come from `door-keygen` and `door-keygen --recovery`. It refuses
+  without `tailnet.enabled`, without root, without `/dev/tpmrm0`, with Tailscale older than 1.86,
+  with a TPM transport override in the environment, or when `FILE` is not a regular, non-empty file
+  owned by root with no group or other permission (such a file is left as it is). It runs a second
+  tailscaled with the boot flags (section 7.3, step 5, plus `--port=0`, so it does not compete with
+  the box's own node for the WireGuard port), joins with `--auth-key=file:FILE`, and checks that
+  the node is `Running` with exactly the configured tags and that the state file is Tailscale's
+  TPM-sealed store (`tailnet_unlock/sealedstate.py` says which fields of `feature/tpm/tpm.go`,
+  v1.104.7, it relies on). It stops the daemon with SIGTERM (a KILL or a non-zero exit is an
+  error), starts tailscaled once more on a copy of the state with no key, which only reaches
+  `Running` if the TPM unseals it as the boot will, and stops it. Then it installs the state and
+  records `tailnet/node.json` (public) and `pins.toml`. `FILE` is overwritten and deleted whether
+  it succeeds or not, the staging directory (a 0700 directory on the tmpfs `/run`) is wiped, and
+  no key or state goes through an argument, the environment or the output. After any failure that
+  follows the join, `tailscale logout` is tried, so no half-enrolled node returns; if that fails,
+  the error names the node to delete. A box that is already enrolled with a sealed state is left
+  alone (`"changed": false`, nothing contacted); `--replace` enrolls again and names the old node,
+  which stays in the admin console until a person deletes it. Unless `--no-rebuild`, it runs
+  `update-initramfs -u -k all` and `verify`. It prints one JSON object, `tailnet-unlock.enroll/1`.
+- `verify [--json] [--tailscale-floor X.Y.Z] [--boot-dir DIR] [--allow-unenrolled]` unpacks every
+  `/boot/initrd.img-*` into a private tmpfs directory, wipes it afterwards, and reports per image
+  the door (sealed, recovery or none), the tailnet, the degradations, the port, the profile, the
+  version of tailscaled (from the conf and from running the binary the image carries, which must
+  agree), whether the state is sealed and the box's own, whether the authorized keys and the
+  recovery key are the ones the box would render now, and whether the image holds a ZFS key file.
+  Exit 1 lists the problems, such as `tailnet-absent`, `tailnet-unexpected`, `state-unsealed`,
+  `version-below-floor`, `sealed-door-absent` or `degraded`; a local key alone is not one. The door
+  checks and the tailnet checks are separate: a box with the tailnet off and no Tailscale installed
+  verifies like any other.
+- `status [--json]` shows the last boot's record, whether the unlock node is enrolled, the sealed
+  door key's fingerprint and a summary of `box.toml`. It exits 0 whatever it finds.
+- `disable --tailnet [--no-rebuild] [--no-logout]` logs the node out (a tailscaled on a copy of the
+  state), overwrites and deletes `tailnet/`, rebuilds the images and checks that none carries
+  tailscaled or state. It is idempotent and prints `tailnet-unlock.disable/1`; the person still
+  deletes the node in the admin console or by API.
+- `door-keygen` and `seal` take `--state-dir` as the door keys' directory (as before), `pins` too,
+  while `enroll`, `verify`, `status` and `disable` take the state directory itself
+  (`/var/lib/tailnet-unlock`). `pins --port` defaults to `door.port` in `box.toml`.
 
 Keyholder: `pins add <pins.toml>`, `unlock <host> [--recovery]`, `deliver <host>`, `watch`,
 `planned <host>`, `approver {ssh,tty,deny} ...`, `audit`.
@@ -1122,13 +1166,17 @@ Every step leaves a box that boots:
 2. Write `box.toml`, `delivery_keys` and `operator_keys` (`enroll --import-dropbear-initramfs` carries
    over the authorized keys of an existing dropbear-initramfs setup; its host keys sat in plain text on
    `/boot` and are not reused).
-3. `tailnet-unlock enroll --auth-key-file <file>`: checks the prerequisites; generates (or imports,
-   `--door-key-file -`) and seals the door key; generates (or imports, `--recovery-key-file -`) the
-   recovery key if recovery is enabled, and stores it unsealed; enrolls the unlock node
-   with a second tailscaled (`--encrypt-state`, userspace networking, its own socket and state) from a
-   single-use, pre-authorized, tagged, non-ephemeral auth key read from the file (`--auth-key=file:`),
-   checks the state is sealed, stops it; turns rehearsal on; rebuilds every initramfs and reads each
-   back; prints `pins.toml`. The auth key file is deleted. The box still boots with its local key.
+3. In release 0.1, two commands, in either order. `tailnet-unlock door-keygen` (and `door-keygen
+   --recovery` when recovery is enabled; `--import -` takes a key you provision) makes the door's
+   keys and seals the door key to the TPM. `tailnet-unlock enroll --auth-key-file <file>` checks the
+   prerequisites and enrolls the unlock node with a second tailscaled (`--encrypt-state`, userspace
+   networking, its own socket and state) from a single-use, pre-authorized, tagged, non-ephemeral
+   auth key read from the file (`--auth-key=file:`), checks the state is sealed and that tailscaled
+   can start from a copy of it, stops it, rebuilds every initramfs and reads each back with
+   `verify`, and prints the node as JSON; `pins` prints the pins. The auth key file is deleted. The
+   box still boots with its local key. Planned for later releases, not built: `enroll` turning
+   rehearsal on, generating the door keys itself, `--door-key-file`, `--recovery-key-file`,
+   `--rekey` and `--import-dropbear-initramfs`.
 4. On the keyholder: `tailnet-unlock pins add pins.toml`, set the host's key source. If the box has a
    local key file, `tailnet-unlock enroll --rekey --sink <command>` can move to a fresh key, handing it
    to your secret store on stdin.
@@ -1307,17 +1355,21 @@ forks. Debian 14 runs use initramfs-tools until the dracut module exists.
 
 ## 16. What is built and planned, and in what order
 
-The work goes in the order of the table. The first four rows make up the first release, for Debian 13
-with ZFS and the `tpm` profile; the last three follow it. "Passes when" names the scenarios of
+The work goes in the order of the table. Release 0.1.0, for Debian 13 with ZFS and the `tpm` profile,
+covers the box side only: the uplink door, the tailnet door, `enroll`, `verify`, `status`,
+`disable --tailnet`, the dpkg trigger, the removal guard and one `.deb`. Delivery (row 4), `commit`
+and the rehearsal, `rotate`, `reseal`, the dracut module, the measured profile and LUKS follow it. A
+person or a script unlocks through the door with plain `ssh`: `status`, then `unlock <boot_id>` with
+the key on stdin. "Passes when" names the scenarios of
 section 15.3 that must pass for the row to count as done.
 
 | Order | Feature | State | Passes when |
 |---|---|---|---|
 | 1 | The design | Written (this document). | n/a |
 | 2 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, a person unlocking by hand (the keyholder `unlock` command is planned; plain `ssh` to the door works today); the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | Built and tested in the Debian 13 test container. The KVM scenarios are written and have not been run (below). | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 |
-| 3 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | Not built. The supervisor already starts and restarts `tailscaled` when a sealed node state exists, but nothing creates that state and no test joins a tailnet. | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) |
+| 3 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | `enroll`, `verify`, `status` and `disable --tailnet` are built and tested in the Debian 13 container against fake daemons and, for the process handling, the real tailscaled without a TPM (a real `--encrypt-state` join needs `/dev/tpmrm0`). The supervisor starts and restarts `tailscaled` from the sealed state. Not built: the real join on a TPM in the VM scenarios, headscale in the harness, the policy example and its tests. | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) |
 | 4 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, the role from the verified key, audit, `watch`, `on_alarm` | Not built, apart from the pure code for pins, the approval contract, the door's status line and the key material, with unit tests. | T2, T3, T12, T13, T14, T24, T25 |
-| 5 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; then release 0.1 after the release run and the hardware smoke test | Not built, except the degraded build (the hook). | T1 to T22 and T24 to T28 (`tpm`), on headscale and on a Tailscale tailnet |
+| 5 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; then release 0.1 after the release run and the hardware smoke test | Built: the degraded build (the hook), `enroll` (the node only), `verify`, `status`, `disable --tailnet`. Not built here: rehearsal, `commit`, `rotate`, `reseal`, the rest of `disable`, the zipapp. | T1 to T22 and T24 to T28 (`tpm`), on headscale and on a Tailscale tailnet |
 | 6 | The dracut module, for Debian 14 | Not built. | T23 (dracut) |
 | 7 | The `measured` profile (systemd-boot and UKI) | Not built. | T8, T9, T10, with Secure Boot on and off |
 | 8 | The LUKS backend | Not built. | T23 (LUKS) |
