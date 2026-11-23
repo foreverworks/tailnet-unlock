@@ -28,7 +28,7 @@ hostname = ""                # empty: "<host>-unlock"
 tags = ["tag:unlock"]
 
 [seal]
-profile = "tpm"              # the only profile so far; "measured" is planned and refused
+profile = "tpm"              # the only profile built; "measured" is planned and refused
 
 # [rehearsal]
 # minutes = 10               # set by enroll, cleared by commit

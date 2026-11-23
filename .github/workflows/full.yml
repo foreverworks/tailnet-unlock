@@ -32,7 +32,7 @@ jobs:
           version: "0.13.9"
           enable-cache: false
       - name: Python ${{ matrix.python }}
-        # uv, not setup-python: the self-hosted runners are Debian VMs, which setup-python has no builds for
+        # uv installs the pinned Python and builds the virtual environment the later steps use
         run: |
           uv python install ${{ matrix.python }}
           uv venv --python ${{ matrix.python }} "$RUNNER_TEMP/venv"

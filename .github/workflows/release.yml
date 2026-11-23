@@ -1,5 +1,5 @@
 # A version tag: the full matrix and the VM scenarios gate a draft release with the source archive
-# and its checksum. The .deb packages and the keyholder zipapp join the assets in M4.
+# and its checksum. The .deb packages and the keyholder zipapp join the assets once they are built.
 name: release
 on:
   push:

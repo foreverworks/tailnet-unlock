@@ -1,4 +1,4 @@
-"""The M1 VM scenarios (DESIGN.md 15.3) on a host with KVM, QEMU, OVMF and swtpm.
+"""The VM scenarios of the uplink door (DESIGN.md 15.3) on a host with KVM, QEMU, OVMF and swtpm.
 
 `make vm-test` runs them. The first run builds the guest: a builder VM boots Debian 13's official
 cloud image (fetched with its SHA512SUMS, read at run time) with a NoCloud seed (an ISO made
@@ -8,7 +8,7 @@ to the target's own swtpm and moves the root to keylocation=prompt. The result i
 hash of its inputs. Each scenario then boots an overlay of that disk with a copy of that TPM.
 
 Every key here is a made-up test value generated for the run. Written for KVM hosts and not yet
-run: the host this was written on had no KVM, so only tests/vm/test_tcg_smoke.py ran.
+run on one; tests/vm/test_tcg_smoke.py is the tier that runs without KVM.
 """
 
 import hashlib

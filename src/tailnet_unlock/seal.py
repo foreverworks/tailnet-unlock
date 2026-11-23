@@ -1,6 +1,6 @@
 """`door-keygen` and `seal`: make or import a door key and seal it to the TPM (DESIGN.md 8.1, 8.4).
 
-These are the M1 building blocks `enroll` calls later. Plaintext keys exist only in a private
+`enroll`, which is planned, will call these. Plaintext keys exist only in a private
 directory on a tmpfs, are overwritten before they are deleted, and the sealed key's plaintext
 goes to tpm2_create on stdin. The recovery key is never sealed, by design (section 9).
 """

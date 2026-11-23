@@ -1,7 +1,7 @@
-"""The `tailnet-unlock` command line: the M1 building blocks (DESIGN.md section 12.5).
+"""The `tailnet-unlock` command line (DESIGN.md section 12.5).
 
-`door-keygen`, `seal`, `render-initramfs` and `pins`. The commands that use them (`enroll`,
-`verify`, `deliver` and the rest) come in later milestones.
+`door-keygen`, `seal`, `render-initramfs`, `pins` and `fingerprint`. The commands that use them
+(`enroll`, `verify`, `deliver` and the rest) are planned.
 """
 
 import argparse

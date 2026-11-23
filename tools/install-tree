@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install the box's files into DESTDIR (default /) where the Debian package will put them.
-# Used by the container tests now and by debian/rules later (M4).
+# Used by the container tests, and by debian/rules once the package exists.
 set -eu
 here=$(cd "${0%/*}/.." && pwd)
 dest=${1:-/}

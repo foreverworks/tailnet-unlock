@@ -1,7 +1,6 @@
 # One job on every push and pull request: shellcheck, mypy, ruff, the ignore check and the unit
 # tests (the busybox and dash tests included) on the newest stable Python, 3.15.2 (python.org,
-# read 2026-11-21). The job runs on self-hosted runners (label tailnet-unlock) while the
-# repository is private, and on GitHub's otherwise.
+# read 2026-11-21). It runs on GitHub-hosted runners.
 name: check
 on:
   push:
@@ -21,7 +20,7 @@ jobs:
           version: "0.13.9"
           enable-cache: false
       - name: Python 3.15.2
-        # uv, not setup-python: the self-hosted runners are Debian VMs, which setup-python has no builds for
+        # uv installs the pinned Python and builds the virtual environment the later steps use
         run: |
           uv python install 3.15.2
           uv venv --python 3.15.2 "$RUNNER_TEMP/venv"

@@ -2,7 +2,7 @@
 # choice), plus Tailscale from its own repository and the Python development tools from PyPI.
 # Base: the official debian:trixie image, digest read on 2026-11-21. The weekly run also builds it
 # on debian:forky@sha256:15f483ba923e165dde04ac535be6f479a62008ae5fefb42fed21896288ce447a (read the
-# same day), where initramfs-tools is installed explicitly until the dracut module (M5).
+# same day), where initramfs-tools is installed explicitly until the dracut module exists.
 ARG BASE=debian:trixie@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
 FROM ${BASE}
 
