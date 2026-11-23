@@ -24,7 +24,7 @@ or serial console, a rescue system, a person on site), a mistake can cost you ac
 and, if you lose the root key, the data on it. Read "If something goes wrong" below before you try
 it on anything that matters.
 
-**Three words used throughout:**
+**Terms used throughout:**
 
 - **initramfs**: the small file system Linux runs first, before your real root is mounted. It is where
   the root gets unlocked.
@@ -32,7 +32,7 @@ it on anything that matters.
 - **TPM**: a chip (or a firmware function) on the motherboard that can encrypt small secrets so that
   only this one machine can decrypt them.
 
-**Three things to know before you read on:**
+**Before you read on:**
 
 - **You need a TPM 2.0.** It is a hard requirement. Most rented servers expose none, and many virtual
   machines either have none or have a virtual TPM whose state is copied along with the machine's
@@ -77,8 +77,10 @@ it is also not for anyone who needs something that installs and works: see the s
 To run what exists today (the checks and a rendering of the boot configuration), on a Linux machine:
 
 - Python 3.13 or later. The tool uses the standard library only.
-- To run the checks: `shellcheck`, `dash` and `busybox`, plus `mypy`, `ruff` and `pytest` (the
-  versions in [`.github/workflows/check.yml`](.github/workflows/check.yml)).
+- To run the checks: `shellcheck`, plus `dash` or `busybox` (the shell tests run under whichever is
+  installed, and CI uses both), from your package manager (`apt install shellcheck dash busybox` on
+  Debian); and `mypy`, `ruff` and `pytest`, which the next section installs into a virtual
+  environment at the versions in [`.github/workflows/check.yml`](.github/workflows/check.yml).
 - To run the full local test suite (`make test`): Docker. It builds a Debian 13 test image and runs
   swtpm (a software TPM), dropbear and a real `mkinitramfs` in it. Nothing touches the TPM, the disks
   or the boot of the machine you run it on.
@@ -91,12 +93,15 @@ software, and nothing here costs money beyond the machine.
 
 There is nothing to install from a release. Work from a checkout of the repository.
 
-**1. Run the checks** (about two minutes). In a virtual environment with the tools above:
+**1. Run the checks** (about two minutes). Install `shellcheck` and `dash` (or `busybox`) with your
+package manager first, then:
 
 ```
 git clone https://github.com/foreverworks/tailnet-unlock
 cd tailnet-unlock
-make check
+python3 -m venv .venv
+.venv/bin/pip install mypy==2.4.1 ruff==0.17.6 pytest==9.2.0
+PATH=$PWD/.venv/bin:$PATH make check
 ```
 
 The last line should look like `212 passed in 98s`; the count grows as tests are added. `make check` runs

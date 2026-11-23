@@ -5,8 +5,9 @@ initramfs hook and boot scripts, and the configuration rendering are built and t
 container, including one real boot under QEMU TCG. The virtual machine scenarios that need KVM are
 written and have not been run. Enrollment, delivery, the keyholder commands, the Debian packages, the
 dracut module, the `measured` profile and the LUKS backend are not built. Section 16 lists each
-feature with its state; sections 17 and 19 hold the versions the design was written against
-(read on 2026-11-21) and the decisions still open.
+feature with its state; section 17 holds the versions the design was written against (read on
+2026-11-21), and section 19 holds the settled decisions, the hazards the design closes and the
+questions still open.
 
 ## 1. Summary
 
@@ -1313,7 +1314,7 @@ section 15.3 that must pass for the row to count as done.
 | Order | Feature | State | Passes when |
 |---|---|---|---|
 | 1 | The design | Written (this document). | n/a |
-| 2 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, a person unlocking by hand over plain `ssh`; the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | Built and tested in the Debian 13 test container. The KVM scenarios are written and have not been run (below). | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 |
+| 2 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, a person unlocking by hand (the keyholder `unlock` command is planned; plain `ssh` to the door works today); the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | Built and tested in the Debian 13 test container. The KVM scenarios are written and have not been run (below). | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 |
 | 3 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | Not built. The supervisor already starts and restarts `tailscaled` when a sealed node state exists, but nothing creates that state and no test joins a tailnet. | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) |
 | 4 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, the role from the verified key, audit, `watch`, `on_alarm` | Not built, apart from the pure code for pins, the approval contract, the door's status line and the key material, with unit tests. | T2, T3, T12, T13, T14, T24, T25 |
 | 5 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; then release 0.1 after the release run and the hardware smoke test | Not built, except the degraded build (the hook). | T1 to T22 and T24 to T28 (`tpm`), on headscale and on a Tailscale tailnet |
