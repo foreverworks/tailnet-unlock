@@ -1,9 +1,12 @@
 # tailnet-unlock: design
 
-Status: design, reviewed and re-reviewed (section 19). Milestone M1's building blocks are built and
-tested in a Debian 13 container, including one real boot under QEMU TCG; the VM scenarios that need
-KVM are written and not yet run (section 16). Versions were read at their sources on 2026-11-21
-(section 17).
+Status: a design with its first parts built. The door, the sealing of its key to the TPM, the
+initramfs hook and boot scripts, and the configuration rendering are built and tested in a Debian 13
+container, including one real boot under QEMU TCG. The virtual machine scenarios that need KVM are
+written and have not been run. Enrollment, delivery, the keyholder commands, the Debian packages, the
+dracut module, the `measured` profile and the LUKS backend are not built. Section 16 lists each
+feature with its state; sections 17 and 19 hold the versions the design was written against
+(read on 2026-11-21) and the decisions still open.
 
 ## 1. Summary
 
@@ -169,7 +172,8 @@ Debian 14 ("forky", testing) is moving: its kernel package `linux-image-7.3.4+de
 depends on `dracut` first (dracut 112 in forky, 106 in trixie). So the core logic lives in
 builder-neutral POSIX shell under `/usr/lib/tailnet-unlock/initramfs/`, initramfs-tools gets thin hook
 and boot scripts in the first release, and a dracut module follows before Debian 14 is released
-(milestone M5). Until then, Debian 14 boxes and test runs install initramfs-tools explicitly.
+(the dracut module, not built). Until then, Debian 14 boxes and test runs install initramfs-tools
+explicitly.
 
 ### 7.2 Build time (on the running system, at every `update-initramfs`)
 
@@ -257,7 +261,7 @@ package) into the image.
       `door.recovery = "uplink+tailnet"`. dropbear never generates keys on its own here (no `-R`).
       As soon as dropbear has written its PID file, the supervisor deletes the plaintext door key:
       dropbear 2025.89 keeps its host key in memory and does not read the file again for new
-      connections (checked in M1), so from then on the unsealed key exists only inside dropbear.
+      connections (checked by the supervisor tests), so from then on the unsealed key exists only inside dropbear.
       Neither daemon's output is kept: dropbear logs every connection, and a scan of the uplink
       could otherwise fill the 16 MiB tmpfs that holds the door's state (the supervisor's console
       lines say what happened). Every write to that state goes through one function that reports
@@ -354,9 +358,9 @@ package) into the image.
      with `getline`, with one trailing newline trimmed, so a stray newline is tolerated and anything
      after the first line is silently ignored; a `raw` key is read as up to 33 bytes and
      `validate_key` refuses anything but 32 ("Raw key too long"), so a raw key with a trailing newline
-     does not load. The door passes the bytes through unchanged (at most 512). The M1 tests check the
-     door against a stand-in that follows this source; the KVM scenario T22 checks it against the real
-     module.
+     does not load. The door passes the bytes through unchanged (at most 512). The unit and shell tests check the
+     door against a stand-in that follows this source; the KVM scenario T22 is to check it against the
+     real module.
 5. The root mounts. **init-bottom/tailnet-unlock** sends TERM to the supervisor, which stops tailscaled
    with SIGTERM (so the control plane sees the unlock node go offline at once) and waits up to 10
    seconds before SIGKILL, stops dropbear by its PID, deletes the door material and exits. If the
@@ -546,7 +550,7 @@ The door key is sealed to:
 Under `measured` the recovery door is off by default (section 9), and the UKI's command line carries
 `tailnet-unlock.noshell` and never `panic=` (section 7.3, exit paths).
 
-GRUB is not supported in `measured` (decided in review, section 19): GRUB measures every command it
+GRUB is not supported in `measured` (decision O2, section 19): GRUB measures every command it
 runs into PCR 8 and every file it reads into PCR 9, and predicting those across `update-grub` means
 simulating its script interpreter. GRUB users get the `tpm` profile.
 
@@ -572,7 +576,7 @@ recorded at build time, copies the container into its tmpfs, and unmounts it.
 
 ### 8.4 The tpm2-tools sequence
 
-Option names as in tpm2-tools 5.7 (trixie); M1 checks each against the installed version. Every
+Option names as in tpm2-tools 5.7 (trixie); the tests check each against the installed version. Every
 command runs with `TPM2TOOLS_TCTI=device:/dev/tpmrm0`, `-Q`, `umask 077`, and its context files in the
 tmpfs.
 
@@ -629,7 +633,7 @@ tpm2_unseal -Q -c door.ctx -p session:s.ctx -o /tailnet-unlock/run/door_key
 tpm2_flushcontext -Q s.ctx; tpm2_flushcontext -Q -t
 ```
 
-Checked against tpm2-tools 5.7 in M1: every option above exists under these names, `tpm2_create -i -`
+Checked against tpm2-tools 5.7 in the test container: every option above exists under these names, `tpm2_create -i -`
 reads the sealed data on stdin (so the plaintext never needs a file of its own), and the TPM refuses
 129 bytes of sealed data and takes 128 (an ed25519 dropbear key is 83). `tpm2_flushcontext` takes a
 session's context file, but it refuses a saved object context ("Argument neither a session nor a
@@ -668,7 +672,7 @@ Under `tpm` nothing is re-sealed, ever. Under `measured`:
 6. `tailnet-unlock verify --next-boot` checks, before a planned reboot, that the default boot entry's
    predicted values satisfy the sealed policy.
 
-Whether the predictor is ours or `systemd-pcrlock` is decided when M6 starts (section 19).
+Whether the predictor is ours or `systemd-pcrlock` is decided when the `measured` profile is built (decision O1, section 19).
 systemd-pcrlock does this prediction with a policy kept in an NV index; systemd 262.2 still marks it
 "This component is experimental and subject to change without advance notice."
 
@@ -980,7 +984,7 @@ LUKS fits the same design; only the backend that turns a key into an unlocked ro
   unlock without any approval and change the boundary to "a stolen machine boots itself".
 - ZFS on LUKS: deliver to LUKS, leave ZFS unencrypted inside.
 
-It is milestone M7, after the ZFS backend is proven.
+It is not built, and comes after the ZFS backend is proven.
 
 ## 12. Packaging and configuration
 
@@ -1030,7 +1034,7 @@ Upgrades are not affected.
 
 ```toml
 [root]
-backend = "zfs"            # "zfs"; "luks" from M7
+backend = "zfs"            # "zfs"; "luks" is planned
 
 [door]
 port = 2222
@@ -1055,7 +1059,7 @@ hostname = ""              # empty: "<host>-unlock"
 tags = ["tag:unlock"]
 
 [seal]
-profile = "tpm"            # "tpm"; "measured" is refused until it is built (M6)
+profile = "tpm"            # "tpm"; "measured" is refused until it is built
 
 [rehearsal]
 minutes = 10               # set by `enroll`, cleared by `commit`
@@ -1092,8 +1096,9 @@ uplink = "192.0.2.10"
 ### 12.5 Commands
 
 Box: `enroll`, `commit`, `status`, `verify [--next-boot]`, `reseal [--profile P] [--next-boot-only]`,
-`rotate`, `disable [--tailnet|--local-key|--console]`, `door-keygen` and `seal` (the M1 building
-blocks `enroll` later calls), `render-initramfs` (used by the hook).
+`rotate`, `disable [--tailnet|--local-key|--console]`, `door-keygen` and `seal` (the building
+blocks `enroll` will call), `render-initramfs` (used by the hook), `pins` and `fingerprint`.
+Built today: `door-keygen`, `seal`, `render-initramfs`, `pins` and `fingerprint`. The rest are planned.
 
 Keyholder: `pins add <pins.toml>`, `unlock <host> [--recovery]`, `deliver <host>`, `watch`,
 `planned <host>`, `approver {ssh,tty,deny} ...`, `audit`.
@@ -1189,7 +1194,7 @@ old node is deleted, so an old `/boot` image stops working.
   decisions are unit-tested without a TPM or a network.
 - `ruff` (target `py313`) for lint and formatting, `pytest` for tests.
 
-Layout (what M1 built, then what later milestones add):
+Layout (what exists, then what is planned):
 
 ```
 initramfs/        POSIX sh: door, supervise, unseal, lib.sh, paths.sh (fixed paths), hook,
@@ -1197,7 +1202,7 @@ initramfs/        POSIX sh: door, supervise, unseal, lib.sh, paths.sh (fixed pat
 src/tailnet_unlock/
                   config, render, authorized_keys, doorkey, tpm, container, seal, cli;
                   keyholder/: pins (the role from the verified key), approval (the contract),
-                  keymaterial, doorstatus. Later: predict, enroll, door_client, deliver,
+                  keymaterial, doorstatus. Planned: predict, enroll, door_client, deliver,
                   approvers/, watch, audit
 tools/            install-tree (puts the files where the package will), check_ignores.py
 tests/unit/       pytest: the pure functions, the harness's command lines
@@ -1206,8 +1211,8 @@ tests/tpm/        door-keygen, seal and unseal against swtpm; the supervisor wit
 tests/initramfs/  real images from mkinitramfs, the degraded builds, the door run from an image
 tests/vm/         the harness, one TCG boot, the KVM scenarios and the guest's provisioning
 tests/container/  the Debian 13 test image (packages from Debian itself)
-examples/         box.toml; later keyholder.toml, policy.hujson, approver scripts
-debian/           packaging (M4)
+examples/         box.toml; planned: keyholder.toml, policy.hujson, approver scripts
+debian/           packaging (planned)
 ```
 
 `make test` runs every tier but the KVM one in the test container, with one command; `make lint
@@ -1221,12 +1226,12 @@ unit` is what CI's check job runs.
 |---|---|---|---|
 | Local | every commit | `make test`: in the Debian 13 test container, `shellcheck --shell=sh`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, the unit and shell tests, swtpm and dropbear, real images, one TCG boot; `make vm-test` for the KVM scenarios | the developer's machine with docker; a Debian host with KVM for the VM scenarios |
 | Check | every push and pull request | **one job**: `shellcheck --shell=sh` on `initramfs/`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, and the unit tests (busybox-sh tests included) on the newest stable Python | GitHub-hosted runner |
-| Weekly | a schedule, once a week | the full matrix: unit tests on Python 3.13 through the newest stable; the container tiers of `make test` on Debian 13 and 14; from M4, package build, `lintian`, install and purge on Debian 13 and 14; the VM scenarios on Debian 13 and 14 against headscale; plus the next Python pre-release, allowed to fail | GitHub-hosted runners (Linux runners expose `/dev/kvm`) |
+| Weekly | a schedule, once a week | the full matrix: unit tests on Python 3.13 through the newest stable; the container tiers of `make test` on Debian 13 and 14; once packages exist, package build, `lintian`, install and purge on Debian 13 and 14; the VM scenarios on Debian 13 and 14 against headscale; plus the next Python pre-release, allowed to fail | GitHub-hosted runners (Linux runners expose `/dev/kvm`) |
 | Release | a version tag | the full matrix and the VM scenarios on every supported Debian release (13 and 14), all required, plus the VM scenarios against a throwaway Tailscale tailnet (an OAuth client in the repository's secrets, scoped to auth keys for a test tag); then the release assets are built | GitHub-hosted runners |
 | Hardware | before each release, by hand | the scenarios that need real hardware on one machine with a discrete TPM and one with a firmware TPM; results in the release notes | the maintainer's machines |
 
 Every workflow job runs on GitHub-hosted runners. Secrets are never available to pull requests from
-forks. Debian 14 runs use initramfs-tools until the dracut module (M5).
+forks. Debian 14 runs use initramfs-tools until the dracut module exists.
 
 ### 15.2 The VM harness
 
@@ -1249,7 +1254,7 @@ forks. Debian 14 runs use initramfs-tools until the dracut module (M5).
   ext4 instead of a boot pool. The encryption root is `rpool`. Packages from trixie `main` and
   `contrib`.
 - **Boot loader**: for `tpm`, GRUB for EFI (`grub-efi-amd64`) with Secure Boot off, reading `/boot`, the
-  common Debian layout. For `measured` (M6), systemd-boot with UKIs on a 1 GiB ESP, Secure Boot off and
+  common Debian layout. For `measured`, systemd-boot with UKIs on a 1 GiB ESP, Secure Boot off and
   on (our own keys enrolled in the VM's variables).
 - **Building the image**: inside a builder VM booted from Debian's official 13 cloud image, which
   installs `zfs-dkms` and writes the target disk, so the CI host needs no ZFS module. Cached by the hash
@@ -1260,16 +1265,17 @@ forks. Debian 14 runs use initramfs-tools until the dracut module (M5).
   before the shell when initramfs-tools gives up waiting for the root. It takes about a minute. Do
   not pass `rootdelay=` there: initramfs-tools 0.148.4 sleeps that long before init-premount even
   starts.
-- **Network**: M1 uses QEMU user networking with a forwarded port standing in for the uplink. From M2,
-  an isolated test network carries headscale 0.29.7 (in a container, with its embedded DERP), so the
+- **Network**: the scenarios that exist use QEMU user networking with a forwarded port standing in for
+  the uplink. Once the tailnet door is built, an isolated test network carries headscale 0.29.7 (in a container, with its embedded DERP), so the
   suite needs no internet and no account.
-- **The keyholder** runs in the harness itself, from M2 with its own tailscaled in userspace networking.
+- **The keyholder** runs in the harness itself, with its own tailscaled in userspace networking once
+  the tailnet door is built.
 
 ### 15.3 Scenarios
 
 | # | Scenario | Passes when |
 |---|---|---|
-| T1 | Boot, unlock by hand through the door (M1: uplink; M2: tailnet) | the root mounts; the unlock node goes offline before the box's own node comes up |
+| T1 | Boot, unlock by hand through the door (first over the uplink, then over the tailnet) | the root mounts; the unlock node goes offline before the box's own node comes up |
 | T2 | Boot, the watcher finds it, the SSH approver approves | delivered; the audit line is complete, `by` names the key that logged in |
 | T3 | Approver refuses; approver times out | nothing is sent; the box keeps waiting; the console still works |
 | T4 | Control plane unreachable | the uplink door unlocks |
@@ -1291,41 +1297,47 @@ forks. Debian 14 runs use initramfs-tools until the dracut module (M5).
 | T20 | The example policy loaded into headscale | a peer that is neither keyholder nor operator cannot reach the door's port; the door reaches nothing; a keyholder reaches only the door's port |
 | T21 | `door.key_source = "import"` and `door.recovery_key_source = "import"` | the imported door key is sealed, its pin matches the one known in advance, no plaintext copy remains on the box; the imported recovery key is stored unsealed (0600) and its pin matches the one known in advance |
 | T22 | Door command grammar | anything but `status`, `unlock <uuid>` and, for operator keys, the empty command is refused; a raw key with a trailing newline and a passphrase with one are both handled as section 7.3 says |
-| T23 | LUKS backend (M7), dracut module (M5) | T1 to T22 and T24 to T28 again for each |
+| T23 | LUKS backend, dracut module | T1 to T22 and T24 to T28 again for each |
 | T24 | A recovery delivery: `allow_recovery_delivery = true`, the TPM cleared | an approval without `"recovery_acknowledged": true` is refused and no key is sent; with it, the key reaches the recovery door; with the setting false, the approver is never asked |
 | T25 | A copy of `/boot` booted on another TPM, with a door changed to report `"key": "sealed"` | the sealed pin fails host key verification; with `allow_recovery_delivery = false` the delivery ends at the gate; with it true, the request says `"role": "recovery"`; the false report is refused and audited |
 | T26 | dropbear killed, then tailscaled killed, while the box waits | the supervisor starts each again within its backoff and prints it on the console; `status` counts the restarts; the restarted door presents the same sealed key; the boot then unlocks |
 | T27 | A wrong key through the door, then at the console | the door answers `wrong-key` and the wait goes on; the console asks again; the right key then unlocks |
 | T28 | `tpm`: `panic()` reached through `break=mount` and through a pool import made to fail | the panic script stops the supervisor and wipes before the shell opens (no dropbear or tailscaled process, no door material in the tmpfs); leaving the shell continues the boot with the console prompt only |
 
-## 16. Milestones
+## 16. What is built and planned, and in what order
 
-| Milestone | Delivers | Done when |
-|---|---|---|
-| M0 | This design | reviewed (section 19) |
-| M1 | The uplink door (built, KVM scenarios pending; below): a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, `unlock` by hand; the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 pass |
-| M2 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) pass |
-| M3 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, the role from the verified key, audit, `watch`, `on_alarm` | T2, T3, T12, T13, T14, T24, T25 pass |
-| M4 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; release 0.1 after the release run and the hardware smoke test | T1 to T22 and T24 to T28 (`tpm`) pass on headscale and on a Tailscale tailnet |
-| M5 | The dracut module, for Debian 14 | T23 (dracut) |
-| M6 | The `measured` profile (systemd-boot and UKI) | T8, T9, T10 pass, Secure Boot on and off |
-| M7 | The LUKS backend | T23 (LUKS) |
+The work goes in the order of the table. The first four rows make up the first release, for Debian 13
+with ZFS and the `tpm` profile; the last three follow it. "Passes when" names the scenarios of
+section 15.3 that must pass for the row to count as done.
 
-Order after 0.1: M5, then M6, then M7 (section 19).
+| Order | Feature | State | Passes when |
+|---|---|---|---|
+| 1 | The design | Written (this document). | n/a |
+| 2 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, a person unlocking by hand over plain `ssh`; the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | Built and tested in the Debian 13 test container. The KVM scenarios are written and have not been run (below). | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 |
+| 3 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | Not built. The supervisor already starts and restarts `tailscaled` when a sealed node state exists, but nothing creates that state and no test joins a tailnet. | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) |
+| 4 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, the role from the verified key, audit, `watch`, `on_alarm` | Not built, apart from the pure code for pins, the approval contract, the door's status line and the key material, with unit tests. | T2, T3, T12, T13, T14, T24, T25 |
+| 5 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; then release 0.1 after the release run and the hardware smoke test | Not built, except the degraded build (the hook). | T1 to T22 and T24 to T28 (`tpm`), on headscale and on a Tailscale tailnet |
+| 6 | The dracut module, for Debian 14 | Not built. | T23 (dracut) |
+| 7 | The `measured` profile (systemd-boot and UKI) | Not built. | T8, T9, T10, with Secure Boot on and off |
+| 8 | The LUKS backend | Not built. | T23 (LUKS) |
 
-Until M6 is built, `seal.profile = "measured"` is refused by the configuration: an image sealed under
-it has no door, so accepting it would leave a box that reboots forever on an initramfs panic.
+After release 0.1 the order is the dracut module, then the `measured` profile, then LUKS (decision
+O8, section 19).
 
-**Where M1 stands.** Built and passing in the Debian 13 test container: `door-keygen` and `seal`
-(`generate` and `import`, the recovery key's import), the container, the unseal, the door and its
-grammar under dash and busybox, the supervisor with its restarts, the panic script on both branches,
-the load-key extension with the console prompt and the rehearsal limit, the hook with every
-degradation, the boot scripts, and one real boot under TCG (section 15.2). The process-level and
-TCG tests cover the door halves of T1, T5, T7, T21, T22, T26, T27 and T28. What remains for M1 is
-the KVM run of `tests/vm/test_scenarios.py` (T1, T3, T5, T6, T7, T14, T21, T22, T27, T28 against a
-ZFS root), which needs a host with `/dev/kvm`, QEMU, OVMF (`OVMF_CODE_4M.fd`, `OVMF_VARS_4M.fd`),
-swtpm, about 20 GB of disk for the cached images, and access to cloud.debian.org and
-deb.debian.org for the first build; and T16's local-key half, which needs `enroll` (M4).
+Until the `measured` profile is built, `seal.profile = "measured"` is refused by the configuration: an
+image sealed under it has no door, so accepting it would leave a box that reboots forever on an
+initramfs panic.
+
+**Where the uplink door stands.** Built and passing in the Debian 13 test container: `door-keygen`
+and `seal` (`generate` and `import`, the recovery key's import), the container, the unseal, the door
+and its grammar under dash and busybox, the supervisor with its restarts, the panic script on both
+branches, the load-key extension with the console prompt and the rehearsal limit, the hook with every
+degradation, the boot scripts, and one real boot under TCG (section 15.2). The process-level and TCG
+tests cover the door halves of T1, T5, T7, T21, T22, T26, T27 and T28. What remains is the KVM run
+of `tests/vm/test_scenarios.py` (T1, T3, T5, T6, T7, T14, T21, T22, T27, T28 against a ZFS root),
+which needs a host with `/dev/kvm`, QEMU, OVMF (`OVMF_CODE_4M.fd`, `OVMF_VARS_4M.fd`), swtpm, about
+20 GB of disk for the cached images, and access to cloud.debian.org and deb.debian.org for the first
+build; and T16's local-key half, which needs `enroll`.
 
 ## 17. Versions, read 2026-11-21
 
@@ -1384,58 +1396,58 @@ tools are pinned to the upstream versions above in pre-commit and CI.
 | D25 | Automated delivery refuses the recovery door unless `allow_recovery_delivery = true` and the approver acknowledges the recovery role | The recovery key is on `/boot` in plain text; sending to it must be a separate, explicit human decision. |
 | D26 | Door material wiped on every exit path; no initramfs shell under `measured` (`tailnet-unlock.noshell` in the UKI command line, and our panic script wipes, then reboots and never returns); never `panic=` | A shell inside a genuine initramfs, after the unseal, would hand out the sealed key; under `measured` that is the attack the profile exists to stop. `panic=` would deny the shell too, but initramfs-tools 0.148.4 then reboots before any panic script runs, so nothing would wipe. |
 | D27 | Separate delivery keys (`restrict`) and operator keys (`no-port-forwarding,no-agent-forwarding,no-X11-forwarding`); the role set by the key line | People need a terminal for the no-echo prompt; automation needs nothing, so it gets nothing. |
-| D28 | CI: one check job on every push and pull request; the full matrix weekly; releases gated by the full matrix and the VM scenarios on Debian 13 and 14; no GitHub-hosted job while the repository is private | Fast feedback for each change, the expensive runs where they matter, and nothing spent on hosted runners before the project is public. |
+| D28 | CI: one check job on every push and pull request; the full matrix weekly; releases gated by the full matrix and the VM scenarios on Debian 13 and 14; every job on GitHub-hosted runners | Fast feedback for each change, the expensive runs where they matter, and hosted runners are free for a public repository. |
 | D29 | `prerm` refuses removal while the box is enrolled | Removing the hooks would leave the next initramfs without a door. |
 | D30 | TPM 2.0 is a hard requirement; no mode without it | Without a TPM the door's identity is plain text on `/boot`, which is the problem this project exists to fix. |
 | D31 | The keyholder derives the door's role only from the host key its SSH client verified, one pin per known-hosts file; the recovery pin is used only with `allow_recovery_delivery = true` or `unlock --recovery` | A copy of `/boot` holds the recovery key unsealed and can report anything about itself, including "sealed". |
 | D32 | A supervisor in the initramfs owns both daemons: it starts them, restarts them with a backoff, and is the one place that stops them and wipes | A door that dies while the box waits would otherwise strand a headless box until someone reaches its console; one owner of the PIDs makes every exit path wipe the same way. |
 
-## 19. Review outcomes
+## 19. Open questions and decisions
 
-The first review (2026-11-21) settled the open questions of the first draft:
+### Decisions
 
-| # | Question | Outcome |
+These settle questions the first draft left open. Most are also stated in the section that uses them.
+
+| # | Question | Decision |
 |---|---|---|
-| O1 | Who predicts PCRs under `measured` | Decided when M6 starts: systemd-pcrlock if it is no longer marked experimental, otherwise our own predictor for PCR 4 in the UKI path only. |
-| O2 | GRUB under `measured` | Not supported; GRUB users get `tpm`. Evil-maid resistance needs systemd-boot with a UKI. |
+| O1 | Who predicts PCRs under `measured` | Decided when the `measured` profile is built: systemd-pcrlock if it is no longer marked experimental, otherwise our own predictor for PCR 4 in the UKI path only. |
+| O2 | GRUB under `measured` | Not supported; GRUB users get `tpm`. Evil-maid resistance needs systemd-boot with a UKI (section 8.2). |
 | O3 | Recovery door default | `"uplink"` under `tpm`, `"off"` under `measured`, over the tailnet only when set (D16), automated delivery gated (D25). |
 | O4 | Expire on alarm | A setting, `on_alarm`, default `alert` (D24). |
 | O5 | An approver that says yes by itself | Not shipped. |
 | O6 | Node state under the `measured` policy | No: Tailscale's own sealing stays; the boundary is written in section 6.2. |
 | O7 | Distribution | Release assets with checksums for 0.x; an apt repository later. |
-| O8 | Order of M5 to M7 | M5 (dracut), then M6 (`measured`), then M7 (LUKS). |
+| O8 | Order of the dracut module, `measured` and LUKS | The dracut module, then `measured`, then LUKS. |
 | O9 | Default door port | 2222. |
 
-A security re-review (2026-11-21) found five gaps, fixed in this revision before any code:
+### Hazards the design closes
 
-| # | Finding | Outcome |
+Each row is a way the design could have failed, the rule that prevents it, and where the rule is
+written. They are listed together because several are easy to reintroduce.
+
+| # | Hazard | How it is closed |
 |---|---|---|
-| R1 | With `panic=` set, initramfs-tools 0.148.4 reboots before `/scripts/panic` runs, so under `measured` nothing wiped | No `panic=` in either profile; our panic script wipes and, under `measured`, reboots itself and never returns (7.3, exit paths; D26; T9, T28) |
-| R2 | The keyholder could take the door's role from the door's own report | The role is the pinned key the SSH client verified, one pin per known-hosts file (10.2; D31; T25) |
-| R3 | The recovery acknowledgement was not in the enforced list, and the recovery key's import had no flag | Refused without it (10.2 step 4, 10.3; T24); `--recovery-key-file -`, and the recovery key is never sealed (8.1; T21) |
-| R4 | A dropbear or tailscaled that dies while the box waits stayed dead | A supervisor restarts both with a backoff (7.3 step 2; D32; T26), and a wrong key is shown not to be an exit (T27) |
-| R5 | A full `/boot`, or a failing Tailscale trigger, could fail a package | The hook degrades to the uplink door (`boot-space`), and the trigger always exits 0 (7.2, 12.1; T18) |
+| H1 | With `panic=` set, initramfs-tools 0.148.4 reboots before `/scripts/panic` runs, so under `measured` nothing would wipe | No `panic=` in either profile; our panic script wipes and, under `measured`, reboots itself and never returns (7.3, exit paths; D26; T9, T28) |
+| H2 | The keyholder could take the door's role from the door's own report | The role is the pinned key the SSH client verified, one pin per known-hosts file (10.2; D31; T25) |
+| H3 | A recovery acknowledgement outside the enforced list, or a recovery key that cannot be imported | Delivery is refused without the acknowledgement (10.2 step 4, 10.3; T24); `--recovery-key-file -` imports the recovery key, which is never sealed (8.1; T21) |
+| H4 | A dropbear or tailscaled that dies while the box waits stays dead | A supervisor restarts both with a backoff (7.3 step 2; D32; T26), and a wrong key is shown not to be an exit (T27) |
+| H5 | A full `/boot`, or a failing Tailscale trigger, fails a package | The hook degrades to the uplink door (`boot-space`), and the trigger always exits 0 (7.2, 12.1; T18) |
+| H6 | dropbear's log in the 16 MiB state tmpfs could be filled from the network | No daemon output is kept; every state write reports failure and the callers say so (7.3 step 2.4) |
+| H7 | The panic script could be signalled, or fail open, before it was ready | Signals are ignored from the first statement; `noshell` is read from `/proc/cmdline` first; a file that will not source means noshell (7.3, exit paths) |
+| H8 | A stop during a start, or an unrecorded PID, leaves a daemon running; a reused PID could be signalled | The supervisor stops from memory and files, defers TERM during a start, and signals a PID only when its command line names the daemon (7.3 step 2.7) |
+| H9 | A plaintext key could reach swap | Key making refuses while swap is active (8.1) |
+| H10 | One transient TPM failure keeps the whole boot on the recovery key | The supervisor retries the unseal and moves the door to the sealed key (7.3 step 2.3) |
+| H11 | A wipe list that claims more than the code does | The list says what is wiped and why the rest is not (7.3, exit paths) |
+| H12 | Smaller: a stored public key not checked against its seed; a host name that starts with `-`; door status and key files read without a size cap; a failed recovery key write that leaves plaintext | Each is checked or capped at its source, with a test |
 
-A security review of M1 (2026-11-21) found these, fixed in code with tests:
-
-| # | Finding | Outcome |
-|---|---|---|
-| S1 | dropbear's log in the 16 MiB state tmpfs could be filled from the network | No daemon output is kept; every state write reports failure and the callers say so (7.3 step 2.4) |
-| S2 | The panic script could be signalled, or fail open, before it was ready | Signals ignored from the first statement; `noshell` read from `/proc/cmdline` first; a file that will not source means noshell (7.3, exit paths) |
-| S3 | A stop during a start, or an unrecorded PID, left a daemon running; a reused PID could be signalled | The supervisor stops from memory and files, defers TERM during a start, and signals a PID only when its command line names the daemon (7.3 step 2.7) |
-| S4 | A plaintext key could reach swap | Key making refuses while swap is active (8.1) |
-| S5 | One transient TPM failure kept the whole boot on the recovery key | The supervisor retries the unseal and moves the door to the sealed key (7.3 step 2.3) |
-| S6 | The wipe list claimed more than the code did | The list now says what is wiped and why the rest is not (7.3, exit paths) |
-| S7 | Smaller: the stored public half of a key was not checked against its seed; a host name could start with `-`; door status and key files were read without a cap; a failed recovery key write left plaintext | Each is checked or capped at its source, with a test |
-
-### Open questions from M1
+### Open questions
 
 | # | Question | Recommendation |
 |---|---|---|
 | Q1 | A `raw` root key at the operator prompt: the door answers `bad-command` after saying the key cannot be typed | Keep the five results; a sixth (`cannot-type`) adds a code no keyholder acts on |
 | Q2 | Objects are flushed with `tpm2_flushcontext -t`, safe only through a resource manager | Keep, and have `enroll` refuse any TCTI but `device:/dev/tpmrm0` on a box |
 | Q3 | The plaintext door key is deleted once dropbear has loaded it, which relies on dropbear 2025.89 not reading the file again; a restart unseals again | Keep; the supervisor test fails if a dropbear upgrade starts reading the file per connection |
-| Q4 | The panic script keys `noshell` off the rendered profile or `tailnet-unlock.noshell`; under `measured` the UKI must carry the word | Keep both, and have M6's `verify` check the word is in every UKI's embedded command line |
+| Q4 | The panic script keys `noshell` off the rendered profile or `tailnet-unlock.noshell`; under `measured` the UKI must carry the word | Keep both, and have the `measured` profile's `verify` check the word is in every UKI's embedded command line |
 | Q5 | The weekly and release jobs use `ubuntu-latest` with nested KVM for the VM scenarios | Keep while the repository is public and hosted runners are free; revisit if runs flake |
 
 ## 20. Prior art

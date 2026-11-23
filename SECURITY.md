@@ -3,6 +3,20 @@
 tailnet-unlock sits in early boot and handles the key that opens an encrypted root, so a
 vulnerability here matters. Thank you for reporting one responsibly.
 
+## State of the software
+
+tailnet-unlock is unfinished and has no release. The door, the sealing of its key to the TPM, the
+initramfs hook and the boot scripts exist and are tested in a Debian 13 container; the commands that
+set up and run a real box end to end do not (see [README.md](README.md) and section 16 of
+[DESIGN.md](DESIGN.md)). It has had no independent security audit. Do not rely on it to protect, or
+to keep you able to reach, a machine you cannot get to by other means.
+
+Because it runs in early boot, a fault can leave a remote machine waiting at a prompt. Keep a
+console (a provider's KVM or serial console, a rescue system, a person on site), test on a machine
+you can afford to lose access to first, and keep at least two copies of the root key that do not
+depend on the box. The way back in for each failure is described in the README under "If something
+goes wrong".
+
 ## Reporting a vulnerability
 
 Please do not open a public issue. Use GitHub's private vulnerability reporting instead:
