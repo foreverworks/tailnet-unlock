@@ -2,5 +2,112 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>foreverworks/renovate-config"
+  ],
+  "ignorePaths": [
+    "**/node_modules/**"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "The Python development tools the workflows install, as name==version.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "\\b(?<depName>mypy|ruff|pytest)==(?<currentValue>[0-9][0-9.]*)"
+      ],
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "customType": "regex",
+      "description": "The same tools in the test image, as ARG MYPY_VERSION and the like.",
+      "managerFilePatterns": [
+        "/^tests/container/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "ARG (?<depName>MYPY|RUFF|PYTEST)_VERSION=(?<currentValue>[0-9][0-9.]*)"
+      ],
+      "depNameTemplate": "{{{lowercase depName}}}",
+      "datasourceTemplate": "pypi"
+    },
+    {
+      "customType": "regex",
+      "description": "The newest stable Python, in the uv commands, the step names and the test matrix.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "(?:uv python install|uv venv --python|- name: Python|stable Python,) (?<currentValue>3\\.[0-9]+\\.[0-9]+)",
+        "python: \\[[^\\]]*\"(?<currentValue>3\\.[0-9]+\\.[0-9]+)\"\\]"
+      ],
+      "depNameTemplate": "python",
+      "datasourceTemplate": "python-version",
+      "versioningTemplate": "python"
+    },
+    {
+      "customType": "regex",
+      "description": "The Debian testing image the full run also builds on, in the workflow and in the Dockerfile's comment.",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/",
+        "/^tests/container/Dockerfile$/"
+      ],
+      "matchStrings": [
+        "(?<depName>debian):(?<currentValue>forky)@(?<currentDigest>sha256:[0-9a-f]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "A new Action or Python tool waits three days before its pull request: both run in CI, and a bad release is usually withdrawn within that time.",
+      "matchDatasources": [
+        "github-tags",
+        "github-releases",
+        "pypi"
+      ],
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "One version of each Python tool everywhere: the workflows and the test image move in one pull request.",
+      "matchDatasources": [
+        "pypi"
+      ],
+      "groupName": "Python tools"
+    },
+    {
+      "description": "A new Python line changes the supported versions, so it waits for a tick on the Dependency Dashboard.",
+      "matchDatasources": [
+        "python-version"
+      ],
+      "matchUpdateTypes": [
+        "minor"
+      ],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Which Debian releases are tested is decided by hand: only their digests move, together.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchDepNames": [
+        "debian"
+      ],
+      "groupName": "Debian test images"
+    },
+    {
+      "description": "No move to another Debian release.",
+      "matchDatasources": [
+        "docker"
+      ],
+      "matchDepNames": [
+        "debian"
+      ],
+      "matchUpdateTypes": [
+        "major",
+        "minor",
+        "patch"
+      ],
+      "enabled": false
+    }
   ]
 }
