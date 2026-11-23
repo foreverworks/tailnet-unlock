@@ -38,6 +38,9 @@ class VmSpec:
     cpus: int = 2
     mac: str = "00:00:5e:00:53:01"
     forwards: tuple[tuple[int, int], ...] = ()
+    # a guest that may not open connections of its own: the forwarded ports still work, so the
+    # harness reaches the guest and the guest reaches nothing (a control plane that is down)
+    restrict: bool = False
     uefi: bool = True
     extra: tuple[str, ...] = field(default_factory=tuple)
 
@@ -103,7 +106,7 @@ def qemu_argv(spec: VmSpec) -> list[str]:
         "-device",
         "tpm-tis,tpmdev=tpm0",
         "-netdev",
-        f"user,id=net0{forwards}",
+        f"user,id=net0{',restrict=on' if spec.restrict else ''}{forwards}",
         "-device",
         f"virtio-net-pci,netdev=net0,mac={spec.mac}",
     ]
@@ -253,6 +256,7 @@ def ssh_argv(
     command: Sequence[str],
     user: str = "root",
     extra: Sequence[str] = (),
+    host: str = "127.0.0.1",
 ) -> list[str]:
     return [
         "ssh",
@@ -273,6 +277,6 @@ def ssh_argv(
         "-o",
         "ConnectTimeout=10",
         *extra,
-        f"{user}@127.0.0.1",
+        f"{user}@{host}",
         *command,
     ]

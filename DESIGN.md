@@ -1266,11 +1266,25 @@ forks. Debian 14 runs use initramfs-tools until the dracut module exists.
   before the shell when initramfs-tools gives up waiting for the root. It takes about a minute. Do
   not pass `rootdelay=` there: initramfs-tools 0.148.4 sleeps that long before init-premount even
   starts.
-- **Network**: the scenarios that exist use QEMU user networking with a forwarded port standing in for
-  the uplink. Once the tailnet door is built, an isolated test network carries headscale 0.29.7 (in a container, with its embedded DERP), so the
-  suite needs no internet and no account.
-- **The keyholder** runs in the harness itself, with its own tailscaled in userspace networking once
-  the tailnet door is built.
+- **Network**: QEMU user networking, with a forwarded port standing in for the uplink. The tailnet
+  scenarios run headscale (0.29.7, pinned by version and SHA-256 in `tests/vm/pins.env`) on the test
+  host as a process the harness starts and stops by PID, with HTTPS from a throwaway CA the guest
+  trusts, its embedded DERP and STUN, and the example policy (`examples/policy.hujson`, the people
+  renamed to the one user the harness creates). The guest reaches the host as 10.0.2.2, so the host's
+  own nodes use that address for the control server too: it is added to the loopback
+  (`ip addr add 10.0.2.2/32 dev lo`). The suite needs no account and, once the pinned files are
+  downloaded, no internet beyond the guest's package mirrors. headscale has no Tailnet Lock, so T19's
+  signed enrollment runs only in the release matrix against a Tailscale tailnet.
+- **The keyholder** runs in the harness itself, as a userspace tailscaled on the host, and reaches the
+  door through `tailscale nc` as an ssh ProxyCommand with the sealed key pinned. A stand-in node with
+  the door's tag, a node of a second user and a node of the operator's user check the policy (T20).
+- **The guest's tailnet variant** is the base image with its own first boot: the unlock node is
+  enrolled through `tailnet-unlock enroll --auth-key-file` with a pre-auth key (a test value) and
+  the CA read from a second small disk. The Tailscale package comes from Tailscale's apt repository
+  at the pinned version, with the repository's keyring checked against a pinned hash.
+- **Test-only hooks** live in the guest image, never in the product: an initramfs script that acts
+  only on `tu_test_kill=1` on the command line (T26), and a helper that adds a GRUB entry for a copy
+  of the image with one script appended (T8).
 
 ### 15.3 Scenarios
 

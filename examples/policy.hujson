@@ -1,0 +1,21 @@
+// An example tailnet policy for tailnet-unlock (DESIGN.md section 7.5).
+// Three roles: tag:unlock is the doors, tag:keyholder is the machines that deliver keys, and a
+// group holds the people who unlock by hand. Replace the address in the group with your own.
+{
+  "groups": {
+    "group:unlock-operators": ["someone@example.com"],
+  },
+  "tagOwners": {
+    "tag:unlock":    ["autogroup:admin"],
+    "tag:keyholder": ["autogroup:admin"],
+  },
+  "grants": [
+    // Operators and keyholders reach the door's port, nothing else on it.
+    {"src": ["group:unlock-operators", "tag:keyholder"], "dst": ["tag:unlock"], "ip": ["tcp:2222"]},
+    // No grant names tag:unlock as a source: a door reaches nothing.
+  ],
+  "tests": [
+    {"src": "tag:keyholder", "accept": ["tag:unlock:2222"]},
+    {"src": "tag:unlock", "deny": ["tag:keyholder:22", "tag:keyholder:2222"]},
+  ],
+}

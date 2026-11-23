@@ -94,3 +94,39 @@ jobs:
           name: vm-logs
           path: ~/.cache/tailnet-unlock/vm/**/*.log
           if-no-files-found: ignore
+
+  vm-tailnet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: KVM is usable by the runner user
+        run: |
+          if [ -c /dev/kvm ] && [ ! -w /dev/kvm ]; then
+            sudo chmod 0666 /dev/kvm || true
+          fi
+          if [ ! -c /dev/kvm ] || [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            echo "::error::$(id -un) cannot open /dev/kvm: the VM scenarios need KVM"
+            ls -l /dev/kvm || true
+            exit 1
+          fi
+      - name: QEMU, OVMF, swtpm, openssl and the guest tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf swtpm \
+            swtpm-tools dropbear-bin python3-pytest openssh-client git xorriso openssl ca-certificates
+      - name: The guest's name for this host
+        # QEMU's user networking shows the host to the guest as 10.0.2.2; the keyholder and the
+        # other test nodes run on the host itself and need the same name for the control server
+        run: sudo ip addr add 10.0.2.2/32 dev lo
+      - run: make vm-tailnet-test PYTHON=python3
+      - if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: vm-tailnet-logs
+          path: |
+            ~/.cache/tailnet-unlock/vm/**/*.log
+            /tmp/pytest-of-*/**/*.log
+          if-no-files-found: ignore

@@ -3,7 +3,8 @@
 #   make lint unit          what CI's check job runs, on any machine with dash and busybox
 #   make tpm initramfs      swtpm, dropbear and mkinitramfs; the test container only
 #   make tcg                one real boot of the image under QEMU TCG with swtpm (about 1 minute)
-#   make vm-test            the VM scenarios on a host with KVM, QEMU, OVMF and swtpm
+#   make vm-test            the uplink VM scenarios on a host with KVM, QEMU, OVMF and swtpm
+#   make vm-tailnet-test    the tailnet VM scenarios: the same host plus openssl and 10.0.2.2 on lo
 
 PYTHON ?= python3
 BUILD_ARGS ?=
@@ -15,7 +16,7 @@ SHELL_SCRIPTS = initramfs/door initramfs/supervise initramfs/unseal initramfs/li
 	initramfs/zfs-load-key initramfs/hook initramfs/post-update tools/install-tree
 PYTEST = $(PYTHON) -m pytest -p no:cacheprovider
 
-.PHONY: test lint unit tpm initramfs tcg vm-test image check
+.PHONY: test lint unit tpm initramfs tcg vm-test vm-tailnet-test image check
 
 check: lint unit
 
@@ -40,6 +41,9 @@ tcg:
 
 vm-test:
 	$(PYTEST) tests/vm/test_scenarios.py
+
+vm-tailnet-test:
+	$(PYTEST) tests/vm/test_tailnet_scenarios.py
 
 image:
 	$(DOCKER) build -q $(BUILD_ARGS) -t $(IMAGE) tests/container >/dev/null
