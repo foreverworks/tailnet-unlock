@@ -8,7 +8,13 @@
 set -eux
 # a failed step must not leave the VM running for the harness to time out on
 finished=0
-trap '[ "$finished" = 1 ] || { echo "TU-FIRSTBOOT failed" >/dev/ttyS0; systemctl poweroff; }' EXIT
+# (in a function: the trace of a `trap` line would print the words the harness waits for)
+give_up() {
+	[ "$finished" = 1 ] && return
+	echo "TU-FIRSTBOOT failed" >/dev/ttyS0
+	systemctl poweroff
+}
+trap give_up EXIT
 mkdir -p /etc/tailnet-unlock /run/tailnet-unlock /run/tukey
 mount -o ro /dev/disk/by-label/TUKEY /run/tukey 2>/dev/null || mount -o ro LABEL=TUKEY /run/tukey
 install -m 0644 /run/tukey/ca.pem /usr/local/share/ca-certificates/tailnet-unlock-test.crt
