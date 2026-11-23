@@ -9,6 +9,7 @@ import base64
 import binascii
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from tailnet_unlock.errors import ConfigError
@@ -112,3 +113,21 @@ def render_authorized_keys(delivery: tuple[PublicKey, ...], operator: tuple[Publ
     lines += ["# from operator_keys: people, who need a terminal for the no-echo prompt"]
     lines += [f"{OPERATOR_OPTIONS} {public_key_line(key)}" for key in operator]
     return "\n".join(lines) + "\n"
+
+
+def read_authorized_keys(config_dir: Path) -> str:
+    """The door's authorized_keys as the hook renders it, from the two key lists."""
+    delivery = parse_key_list(_read_optional(config_dir / "delivery_keys"), "delivery_keys")
+    operator = parse_key_list(_read_optional(config_dir / "operator_keys"), "operator_keys")
+    if not delivery and not operator:
+        raise ConfigError(
+            "delivery_keys and operator_keys are both empty: nobody could log in to the door"
+        )
+    return render_authorized_keys(delivery, operator)
+
+
+def _read_optional(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
