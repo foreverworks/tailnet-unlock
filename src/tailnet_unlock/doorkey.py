@@ -23,6 +23,9 @@ DROPBEAR_ED25519_LENGTH = 4 + len(ED25519) + 4 + 64
 OPENSSH_PEM_BEGIN = b"-----BEGIN OPENSSH PRIVATE KEY-----"
 MAX_IMPORT_BYTES = 16384
 PROC_SWAPS = Path("/proc/swaps")
+SYS_BLOCK = Path("/sys/block")
+CRYPTTAB = Path("/etc/crypttab")
+RANDOM_KEYS = ("/dev/urandom", "/dev/random")
 
 
 def _string(data: bytes) -> bytes:
@@ -123,9 +126,34 @@ def swap_devices(swaps: str) -> list[str]:
     return [line.split()[0] for line in swaps.splitlines()[1:] if line.split()]
 
 
+def random_key_swap(device: str) -> bool:
+    """Whether a swap area is dm-crypt in plain mode under a key drawn at random at each boot.
+
+    What reaches that disk is unreadable once the machine is off, as RAM is. Both halves must hold:
+    the kernel's own record of the mapping (its device-mapper uuid) and /etc/crypttab's key field.
+    Anything unreadable or unexpected is a plain no.
+    """
+    try:
+        entry = SYS_BLOCK / Path(device).name / "dm"
+        if not (entry / "uuid").read_text(encoding="utf-8").startswith("CRYPT-PLAIN-"):
+            return False
+        name = (entry / "name").read_text(encoding="utf-8").strip()
+        table = CRYPTTAB.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    rows = [line.split() for line in table.splitlines() if not line.lstrip().startswith("#")]
+    keys = [row[2] for row in rows if len(row) >= 3 and row[0] == name]
+    return len(keys) == 1 and keys[0] in RANDOM_KEYS
+
+
 def disk_swap_devices(swaps: str) -> list[str]:
-    """The swap areas that can reach a disk: every one but a zram device, which is RAM."""
-    return [device for device in swap_devices(swaps) if not device.startswith("/dev/zram")]
+    """The swap areas a key could be read back from: every one but a zram device, which is RAM, and
+    dm-crypt under a random key, which is gone with the power."""
+    return [
+        device
+        for device in swap_devices(swaps)
+        if not device.startswith("/dev/zram") and not random_key_swap(device)
+    ]
 
 
 def require_no_swap(allow_swap: bool = False) -> bool:

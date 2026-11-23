@@ -81,6 +81,45 @@ def test_zram_is_ram_and_is_not_swap_to_a_disk() -> None:
     assert disk_swap_devices(header + "/dev/zram0 partition 1024 0 100\n") == []
 
 
+@pytest.mark.parametrize(
+    ("uuid", "crypttab", "accepted"),
+    [
+        ("CRYPT-PLAIN-swap0\n", "swap0 /dev/vda4 /dev/urandom swap\n", True),
+        ("CRYPT-PLAIN-swap0\n", "swap0 /dev/vda4 /dev/random swap\n", True),
+        ("CRYPT-PLAIN-swap0\n", "swap0 /dev/vda4 /etc/keys/swap swap\n", False),
+        ("CRYPT-PLAIN-swap0\n", "#swap0 /dev/vda4 /dev/urandom swap\n", False),
+        ("CRYPT-PLAIN-swap0\n", "other /dev/vda4 /dev/urandom swap\n", False),
+        ("CRYPT-LUKS2-abc-swap0\n", "swap0 /dev/vda4 /dev/urandom swap\n", False),
+        ("LVM-abc\n", "swap0 /dev/vda4 /dev/urandom swap\n", False),
+        (
+            "CRYPT-PLAIN-swap0\n",
+            "swap0 /dev/vda4 /dev/urandom swap\nswap0 /dev/vda5 /etc/key swap\n",
+            False,
+        ),
+    ],
+)
+def test_swap_under_a_random_key_is_not_swap_to_a_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, uuid: str, crypttab: str, accepted: bool
+) -> None:
+    dm = tmp_path / "block/dm-0/dm"
+    dm.mkdir(parents=True)
+    (dm / "uuid").write_text(uuid)
+    (dm / "name").write_text("swap0\n")
+    (tmp_path / "crypttab").write_text(crypttab)
+    monkeypatch.setattr(doorkey, "SYS_BLOCK", tmp_path / "block")
+    monkeypatch.setattr(doorkey, "CRYPTTAB", tmp_path / "crypttab")
+    swaps = "Filename Type Size Used Priority\n/dev/dm-0 partition 2048 0 -2\n"
+    assert disk_swap_devices(swaps) == ([] if accepted else ["/dev/dm-0"])
+
+
+def test_swap_that_cannot_be_judged_is_swap_to_a_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(doorkey, "SYS_BLOCK", tmp_path / "missing")
+    swaps = "Filename Type Size Used Priority\n/dev/dm-0 partition 2048 0 -2\n"
+    assert disk_swap_devices(swaps) == ["/dev/dm-0"]
+
+
 def test_allow_swap_warns_and_reports_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

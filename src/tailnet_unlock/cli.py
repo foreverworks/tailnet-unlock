@@ -45,8 +45,8 @@ DOOR_DIR_COMMANDS = ("door-keygen", "pins")
 WORK_DIR = RUN_DIR
 MAX_STDIN = 16384
 SWAP_HELP = (
-    "make keys even though swap (other than zram) is active, where `swapoff -a` is unsafe; "
-    "the plaintext key may reach the disk, and the output says so"
+    "make keys even though swap (other than zram, or dm-crypt under a random key) is active, where "
+    "`swapoff -a` is unsafe; the plaintext key may reach the disk, and the output says so"
 )
 
 

@@ -137,6 +137,33 @@ def test_a_flood_from_the_daemons_cannot_fill_the_state_directory(
     assert not list(box.run.glob("*.log"))
 
 
+@pytest.mark.parametrize("tool", ["ip", "ifconfig"])
+def test_the_loopback_is_up_before_the_door_listens(
+    tmp_path: Path,
+    shell: Shell,
+    running: list[tuple[subprocess.Popen[bytes], Sandbox]],
+    tool: str,
+) -> None:
+    """The tailnet reaches the door at 127.0.0.1, which does not exist while lo is down."""
+    box = door_box(tmp_path)
+    noted = '#!/bin/sh\nprintf "%s %s\\n" "${0##*/}" "$*" >>@ROOT@/loopback\n'
+    for name in ("ip", "ifconfig"):
+        fails = "exit 1\n" if name == "ip" and tool == "ifconfig" else ""
+        write_script(box.bin / name, noted + fails, box.root)
+    write_script(
+        box.bin / "dropbear",
+        STUB_DROPBEAR.replace(
+            "#!/bin/sh\n", "#!/bin/sh\ncp @ROOT@/loopback @ROOT@/loopback-at-door\n", 1
+        ),
+        box.root,
+    )
+    running.append((start_supervisor(box, shell), box))
+    wait_until((box.run / "dropbear.pid").exists)
+    calls = (box.root / "loopback-at-door").read_text().splitlines()
+    expected = ["ip link set dev lo up"]
+    assert calls[:2] == (expected if tool == "ip" else [*expected, "ifconfig lo up"])
+
+
 def test_a_daemon_whose_pid_could_not_be_recorded_is_still_stopped(
     tmp_path: Path, shell: Shell, running: list[tuple[subprocess.Popen[bytes], Sandbox]]
 ) -> None:

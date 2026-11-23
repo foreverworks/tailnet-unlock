@@ -46,7 +46,8 @@ it on anything that matters.
   tool.
 - **Turn swap off while the door's keys are made.** A key made on the box exists in plain form for a
   moment, in memory, and memory can be written to a swap disk. The key tools refuse to run while a
-  swap area on a disk is active (zram is RAM and does not count): run `swapoff -a` first. If that is
+  swap area on a disk is active (zram is RAM and does not count; neither does swap that
+  `/etc/crypttab` encrypts with a fresh random key at each boot): run `swapoff -a` first. If that is
   unsafe on your box, `--allow-swap` makes the keys anyway, prints a warning, and the output says it
   was used, so the choice stays visible.
 

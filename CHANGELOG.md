@@ -12,7 +12,8 @@ initramfs-tools.
 
 - The uplink door: a minimal SSH server in the initramfs, on the machine's own address, whose only
   commands are `status` and `unlock <boot id>` (the key on stdin). `door-keygen` makes or imports its
-  key and seals it to the TPM; `door-keygen --recovery` makes the recovery door's key, stored unsealed
+  key and seals it to the TPM, and refuses while a swap area could keep the plaintext (zram and
+  random-key dm-crypt swap are fine); `door-keygen --recovery` makes the recovery door's key, stored unsealed
   on purpose. The panic handler wipes the door before a shell can open.
 - The tailnet door: `enroll --auth-key-file` gives the door its own Tailscale node, `<host>-unlock`,
   whose state is sealed by the TPM through `tailscaled --encrypt-state`. The same door answers on

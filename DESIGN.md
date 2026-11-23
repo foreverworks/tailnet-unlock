@@ -245,7 +245,8 @@ package) into the image.
    PID. Everything long runs in the supervisor (decision D32):
    1. Loads the TPM driver and waits up to 10 seconds for `/dev/tpmrm0` (the kernel's resource
       manager).
-   2. Brings up the uplink with initramfs-tools' `configure_networking` from the rendered `IP=` and
+   2. Brings up the loopback (nothing else does in an initramfs, and the tailnet path reaches the door
+      at `127.0.0.1`), then the uplink with initramfs-tools' `configure_networking` from the rendered `IP=` and
       `BOOTIF=` (DHCP or static, matched by MAC so interface names do not matter), and writes
       `/etc/resolv.conf` from the DHCP answer or the configured resolvers.
    3. Unseals the door key into the tmpfs (section 8.4). On failure it records why and, if the
@@ -502,7 +503,9 @@ takes the equivalent `acls` rules, and the VM suite checks the same rules live a
 on the box with `dropbearkey -t ed25519` in a tmpfs, seals it, and deletes the plaintext; the pin is
 printed afterwards. Every command that makes or converts a plaintext key refuses while a swap area that can
 reach a disk is active (`/proc/swaps`): a tmpfs page, like the memory of the process holding the key,
-can be written to swap. A zram device is RAM and does not count. The tool says so and asks for
+can be written to swap. A zram device is RAM and does not count, and neither does dm-crypt in plain
+mode whose `/etc/crypttab` key is `/dev/urandom` or `/dev/random`: its key is gone with the power. The
+tool says so and asks for
 `swapoff -a` for the time it takes, or, for a box where that is unsafe, `--allow-swap`: it prints a
 warning and ends its output with a comment line saying the key was made with swap active, which
 `enroll` keeps with the pins and in the box's state. (The other

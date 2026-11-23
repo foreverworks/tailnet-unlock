@@ -112,6 +112,13 @@ usable_address() {
 	[ "$count" -eq 4 ] && [ "$first" -ge 1 ] && [ "$first" -le 223 ]
 }
 
+# The door's side of the tailnet is a listener on 127.0.0.1, which tailscaled forwards to, and
+# nothing else brings the loopback up in an initramfs: without it the address does not exist.
+bring_up_loopback() {
+	ip link set dev lo up 2>/dev/null || ifconfig lo up 2>/dev/null ||
+		tu_log "cannot bring the loopback up; the tailnet door will not answer"
+}
+
 bring_up_uplink() {
 	# configure_networking and its helpers come from initramfs-tools
 	# shellcheck disable=SC1090 # initramfs-tools' scripts/functions, at boot only
@@ -346,6 +353,7 @@ if tu_noshell; then
 fi
 wait_for_tpm || tu_log "no TPM at $TU_TPM_DEVICE after 10 seconds"
 check_stop
+bring_up_loopback
 bring_up_uplink
 check_stop
 tu_log "uplink ${uplink_device:-none} ${uplink_address:-without an address}"
