@@ -38,7 +38,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["tailnet_unlock", "keys", "shellenv", "swtpm", "imagekit", "harness", "tsfake"]
+known-first-party = ["tailnet_unlock", "keys", "shellenv", "swtpm", "imagekit", "harness", "tsfake", "guests", "tailnet"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S108", "PLC0415", "RUF001"]  # tests hold hostile and look-alike input on purpose

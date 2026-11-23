@@ -56,7 +56,7 @@ EOF
 printf 'tu-test\n' >/mnt/etc/hostname
 mkdir -p /mnt/opt/tailnet-unlock
 tar -xf "$seed/repo.tar" -C /mnt/opt/tailnet-unlock
-cp "$seed/firstboot.sh" /mnt/opt/tailnet-unlock/
+cp "$seed/firstboot.sh" "$seed/firstboot-tailnet.sh" "$seed/pins.env" /mnt/opt/tailnet-unlock/
 cp "$seed"/test-keys/* /mnt/opt/tailnet-unlock/ 2>/dev/null || :
 
 chroot /mnt /bin/sh -eux <<'EOF'
@@ -64,8 +64,21 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends linux-image-amd64 linux-headers-amd64 zfs-dkms \
 	zfs-initramfs zfsutils-linux grub-efi-amd64 dropbear-bin tpm2-tools \
-	libtss2-tcti-device0t64 python3 openssh-server busybox initramfs-tools systemd-sysv xxd
+	libtss2-tcti-device0t64 python3 openssh-server busybox initramfs-tools systemd-sysv xxd \
+	ca-certificates curl gnupg
 /opt/tailnet-unlock/tools/install-tree /
+# Tailscale from its own apt repository, at the version pins.env names; the keyring must be the
+# file whose hash is pinned. Every image still builds without tailscaled unless a box enrols.
+. /opt/tailnet-unlock/pins.env
+curl -fsSL https://pkgs.tailscale.com/stable/debian/trixie.noarmor.gpg \
+	-o /usr/share/keyrings/tailscale-archive-keyring.gpg
+echo "$TAILSCALE_KEYRING_SHA256  /usr/share/keyrings/tailscale-archive-keyring.gpg" | sha256sum -c -
+echo 'deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/debian trixie main' \
+	>/etc/apt/sources.list.d/tailscale.list
+apt-get update
+apt-get install -y --no-install-recommends "tailscale=$TAILSCALE_VERSION"
+# the booted system is not a tailnet client: the unlock node is the only one these scenarios enrol
+systemctl disable tailscaled.service
 zfs set keylocation=file:///etc/zfs/rpool.key rpool
 echo 'GRUB_CMDLINE_LINUX="console=ttyS0,115200 root=ZFS=rpool/ROOT/debian"' \
 	>/etc/default/grub.d/tailnet-unlock-test.cfg
@@ -86,11 +99,99 @@ menuentry "tailnet-unlock break=mount" {
 ENTRY
 GRUB
 chmod 0755 /etc/grub.d/42_tailnet_unlock_test
+# Scenario T26: an initramfs script that exists only in this test image and only acts on the word
+# tu_test_kill=1 on the command line. Once the door is up it kills tailscaled, then dropbear, with
+# SIGKILL by the PIDs the supervisor recorded, a minute apart, so the supervisor's restart shows.
+mkdir -p /etc/initramfs-tools/scripts/init-premount
+cat >/etc/initramfs-tools/scripts/init-premount/zz-tu-test-kill <<'HOOK'
+#!/bin/sh
+PREREQ="tailnet-unlock"
+prereqs() { echo "$PREREQ"; }
+case "${1-}" in
+prereqs) prereqs; exit 0 ;;
+esac
+grep -q 'tu_test_kill=1' /proc/cmdline || exit 0
+(
+	run=/tailnet-unlock/run
+	waited=0
+	while [ ! -s "$run/tailscaled.child" ] && [ "$waited" -lt 180 ]; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	sleep 75
+	for daemon in tailscaled dropbear; do
+		pid=$(cat "$run/$daemon.child" 2>/dev/null) || continue
+		kill -KILL "$pid" 2>/dev/null
+		echo "TU-TEST killed $daemon $pid" >/dev/console
+		sleep 60
+	done
+) </dev/null >/dev/null 2>&1 &
+exit 0
+HOOK
+chmod 0755 /etc/initramfs-tools/scripts/init-premount/zz-tu-test-kill
+cat >/etc/grub.d/44_tailnet_unlock_kill <<'GRUB'
+#!/bin/sh
+# a third entry for scenario T26: the same kernel, with the test script's word on the command line
+. /usr/lib/grub/grub-mkconfig_lib
+kernel=$(ls /boot/vmlinuz-* | sort -V | tail -n 1)
+version=${kernel#/boot/vmlinuz-}
+cat <<ENTRY
+menuentry "tailnet-unlock kill test" {
+	search --no-floppy --label boot --set=root
+	linux /vmlinuz-$version console=ttyS0,115200 root=ZFS=rpool/ROOT/debian tu_test_kill=1
+	initrd /initrd.img-$version
+}
+ENTRY
+GRUB
+chmod 0755 /etc/grub.d/44_tailnet_unlock_kill
+# Scenario T8: a copy of the newest initramfs with one cpio appended (a script that prints a marker,
+# listed in the premount ORDER file) and a GRUB entry for it: a modified image on the same TPM.
+cat >/usr/local/sbin/tu-make-tamper-entry <<'TAMPER'
+#!/bin/sh
+set -eu
+kernel=$(ls /boot/vmlinuz-* | sort -V | tail -n 1)
+v=${kernel#/boot/vmlinuz-}
+d=$(mktemp -d)
+unmkinitramfs "/boot/initrd.img-$v" "$d"
+m=$d
+[ -d "$d/main" ] && m=$d/main
+t=$(mktemp -d)
+mkdir -p "$t/scripts/init-premount"
+cp "$m/scripts/init-premount/ORDER" "$t/scripts/init-premount/ORDER"
+echo '/scripts/init-premount/zz-tamper "$@"' >>"$t/scripts/init-premount/ORDER"
+printf '#!/bin/sh\necho TU-TAMPERED the initramfs was modified >/dev/console\n' \
+	>"$t/scripts/init-premount/zz-tamper"
+chmod 0755 "$t/scripts/init-premount/zz-tamper"
+(cd "$t" && find . | cpio -o -H newc --quiet) | gzip -9 >/boot/tamper.cpio.gz
+cat "/boot/initrd.img-$v" /boot/tamper.cpio.gz >"/boot/initrd.img-$v.tampered"
+cat >/etc/grub.d/43_tailnet_unlock_tamper <<ENTRY
+#!/bin/sh
+cat <<MENU
+menuentry "tailnet-unlock tampered initramfs" {
+	search --no-floppy --label boot --set=root
+	linux /vmlinuz-$v console=ttyS0,115200 root=ZFS=rpool/ROOT/debian
+	initrd /initrd.img-$v.tampered
+}
+MENU
+ENTRY
+chmod 0755 /etc/grub.d/43_tailnet_unlock_tamper
+update-grub
+TAMPER
+chmod 0755 /usr/local/sbin/tu-make-tamper-entry
 sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
 update-grub
 mkdir -p /root/.ssh && chmod 0700 /root/.ssh
 cp /opt/tailnet-unlock/harness_ssh.pub /root/.ssh/authorized_keys
-cp /opt/tailnet-unlock/firstboot.sh /usr/local/sbin/tailnet-unlock-firstboot
+# the first boot is the tailnet variant's when a disk labelled TUKEY is attached, the uplink's otherwise
+cat >/usr/local/sbin/tailnet-unlock-firstboot <<'WRAP'
+#!/bin/sh
+udevadm settle
+if [ -e /dev/disk/by-label/TUKEY ]; then
+	exec sh /opt/tailnet-unlock/firstboot-tailnet.sh
+fi
+exec sh /opt/tailnet-unlock/firstboot.sh
+WRAP
+chmod 0755 /usr/local/sbin/tailnet-unlock-firstboot
 cat >/etc/systemd/system/tailnet-unlock-firstboot.service <<'UNIT'
 [Unit]
 Description=tailnet-unlock test: seal the door to this VM's TPM, then power off

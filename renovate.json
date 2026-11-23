@@ -55,6 +55,16 @@
         "(?<depName>debian):(?<currentValue>forky)@(?<currentDigest>sha256:[0-9a-f]{64})"
       ],
       "datasourceTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "description": "The headscale and Tailscale releases the tailnet tier of the VM suite runs, annotated in tests/vm/pins.env.",
+      "managerFilePatterns": [
+        "/^tests/vm/pins\\.env$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>[^ ]+) extractVersion=(?<extractVersion>[^\\n]+)\\n[A-Z_]+_VERSION=(?<currentValue>[0-9][0-9.]*)"
+      ]
     }
   ],
   "packageRules": [

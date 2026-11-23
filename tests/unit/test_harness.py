@@ -41,3 +41,11 @@ def test_swtpm_and_ssh() -> None:
     argv = ssh_argv(2222, Path("/k"), Path("/h"), ["status"])
     assert "StrictHostKeyChecking=yes" in argv
     assert argv[-2:] == ["root@127.0.0.1", "status"]
+
+
+def test_restricted_network_and_a_ssh_host() -> None:
+    spec = VmSpec(name="t", workdir=Path("/w"), forwards=((2222, 2222),), restrict=True)
+    assert "user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:2222-:2222" in " ".join(qemu_argv(spec))
+    assert "restrict" not in " ".join(qemu_argv(VmSpec(name="t", workdir=Path("/w"))))
+    argv = ssh_argv(2222, Path("/k"), Path("/h"), ["status"], host="192.0.2.2")
+    assert argv[-2:] == ["root@192.0.2.2", "status"]
