@@ -301,6 +301,37 @@ def test_removal_is_allowed_when_the_box_is_not_enrolled(debs: dict[str, Path]) 
     assert not installed()
 
 
+def test_removal_rebuilds_the_images_without_the_door(debs: dict[str, Path]) -> None:
+    set_update_initramfs(0)
+    enroll_on_disk()
+    assert apt_install(debs["0.1.0"]).returncode == 0
+    set_zfs(["none"])
+    CALLS.unlink()
+    # the rebuild must see a system whose hook is gone, or the image would carry the door again
+    UPDATE.write_text(
+        "#!/bin/sh\n[ ! -e /usr/share/initramfs-tools/hooks/tailnet-unlock ] || exit 1\n"
+        f'echo "$*" >>{CALLS}\n',
+        encoding="utf-8",
+    )
+    done = sh("dpkg", "--remove", "tailnet-unlock", fake_zfs=True)
+    assert done.returncode == 0, done.stderr
+    assert calls() == ["-u -k all"]
+    CALLS.unlink()
+    assert sh("dpkg", "--purge", "tailnet-unlock", fake_zfs=True).returncode == 0
+    assert calls() == [], "the purge that follows has nothing left to rebuild"
+
+
+def test_a_failing_rebuild_never_fails_the_removal(debs: dict[str, Path]) -> None:
+    set_update_initramfs(1)
+    enroll_on_disk()
+    assert apt_install(debs["0.1.0"]).returncode == 0
+    set_zfs(["none"])
+    done = sh("dpkg", "--remove", "tailnet-unlock", fake_zfs=True)
+    assert done.returncode == 0, done.stderr
+    assert "W: tailnet-unlock:" in done.stdout + done.stderr
+    assert not installed()
+
+
 def test_purge_removes_everything_of_ours(debs: dict[str, Path]) -> None:
     assert apt_install(debs["0.1.0"]).returncode == 0
     enroll_on_disk()

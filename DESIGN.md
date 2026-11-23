@@ -454,8 +454,8 @@ that profile's boundary.
 - **headscale**: `tailnet.login_server` names it; nothing else changes.
 - **Size**: measured from Tailscale's own 1.104.7 amd64 tarball on 2026-11-21: `tailscaled` is 43.9 MB
   (21.5 MB at zstd level 9), the `tailscale` CLI 34.3 MB (16.7 MB at zstd level 9). The image carries
-  tailscaled only (D21); `enroll` checks `/boot` has room for every installed kernel's image, and the
-  hook checks again at every build and degrades the image instead of failing it (7.2, step 6).
+  tailscaled only (D21); the hook checks at every build that `/boot` has room and degrades the image
+  instead of failing it (7.2, step 6).
 
 ### 7.5 Tailnet policy
 
@@ -1043,7 +1043,8 @@ encryption root at `prompt`. It says what to do first (give the pool its key fil
 images, reboot once, then remove): removing the hooks would leave the next initramfs without a door.
 A box without `zfs` is not refused; one where `zfs` fails is, because the guard cannot tell. Upgrades
 (and every other action) are not affected. `postrm` removes the Python bytecode that root's runs leave
-beside the package, and on `purge` deletes `/etc/tailnet-unlock` and `/var/lib/tailnet-unlock`.
+beside the package, rebuilds the images of a set-up box so that none keeps the door (a failure is said
+and never fails the package), and on `purge` deletes `/etc/tailnet-unlock` and `/var/lib/tailnet-unlock`.
 
 ### 12.2 Files
 

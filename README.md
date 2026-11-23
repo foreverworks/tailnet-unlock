@@ -249,14 +249,15 @@ These are the ways back in, in the order to try them.
    the images without `tailscaled`. It prints the node's id: delete that node in your Tailscale admin
    console (or with its API) too, because the tool cannot.
 3. `sudo apt remove tailnet-unlock`. The removal guard lets it through once no root asks for its key
-   at the prompt. `apt purge` also deletes the door's keys and the box's configuration.
+   at the prompt, and rebuilds the images without the door. `apt purge` also deletes the door's keys
+   and the box's configuration.
 
 ## What tailnet-unlock is designed to do
 
 1. **Early boot opens a door.** The initramfs brings up the network, starts a minimal SSH server and a
    Tailscale node of its own, `<host>-unlock`. The door answers on your tailnet and on the box's own
-   address. Behind NAT, the tailnet is how you reach it. Built: the
-   SSH server, the network, and `enroll`, which gives the node its identity.
+   address. Behind NAT, the tailnet is how you reach it. Built: the SSH
+   server, the network, and `enroll`, which gives the node its identity.
 2. **The door can only do one thing.** Every login runs one command: report its status, or accept a
    key. No shell, no forwarding, keys only. Built.
 3. **The door's identity is sealed to the TPM.** Its SSH host key and its tailnet node keys are

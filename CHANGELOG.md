@@ -23,7 +23,8 @@ initramfs-tools.
 - One Debian package, `tailnet-unlock_0.1.0_all.deb`: the hook and boot scripts, the door, the ZFS
   key-loading extension and the command. A dpkg trigger rebuilds the initramfs images when
   `tailscaled` changes and never fails the upgrade. The package refuses to be removed or purged
-  while the box unlocks through its door, and conflicts with `dropbear-initramfs`.
+  while the box unlocks through its door, rebuilds the images without the door once it is removed, and
+  conflicts with `dropbear-initramfs`.
 - Release assets: the package, a source archive and `SHA256SUMS`, with build provenance. The package
   is reproducible: the same commit gives the same bytes.
 

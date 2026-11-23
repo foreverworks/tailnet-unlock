@@ -1,11 +1,23 @@
 #!/bin/sh
 # Python writes bytecode next to the package when root runs it; dpkg does not know those files and
-# would leave the directories behind. Purge removes the box's configuration and state.
+# would leave the directories behind. The images still hold the door after the files are gone, so a
+# box that was set up gets its images rebuilt without it; as in postinst, a failed rebuild is said on
+# stderr and never fails the package. Purge removes the box's configuration and state.
 set -e
 
 case "$1" in
 remove | purge)
 	rm -rf /usr/lib/python3/dist-packages/tailnet_unlock
+	;;
+*) ;;
+esac
+
+case "$1" in
+remove)
+	if [ -f /etc/tailnet-unlock/box.toml ] && command -v update-initramfs >/dev/null 2>&1; then
+		update-initramfs -u -k all ||
+			echo "W: tailnet-unlock: update-initramfs -u -k all failed; the images may still hold the door, run it by hand" >&2
+	fi
 	;;
 *) ;;
 esac
