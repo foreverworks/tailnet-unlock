@@ -95,7 +95,6 @@ def test_tailscale_up_reads_the_key_from_its_file(box: Box) -> None:
     assert str(ups[0]["key_file"]) == str(box.key)
     for expected in (
         "--hostname=box-unlock",
-        "--advertise-tags=tag:unlock",
         "--accept-dns=false",
         "--accept-routes=false",
         "--ssh=false",
@@ -103,7 +102,7 @@ def test_tailscale_up_reads_the_key_from_its_file(box: Box) -> None:
         "--timeout=120s",
     ):
         assert expected in argv
-    assert not any(str(item).startswith("--login-server") for item in argv)
+    assert not any(str(item).startswith(("--login-server", "--advertise-tags")) for item in argv)
 
 
 def test_a_login_server_is_passed_through(box: Box) -> None:

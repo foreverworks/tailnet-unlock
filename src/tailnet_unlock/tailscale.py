@@ -268,16 +268,18 @@ def bring_up(
     socket: Path,
     auth_key_file: Path,
     hostname: str,
-    tags: tuple[str, ...],
     login_server: str,
     timeout: int,
 ) -> None:
-    """`tailscale up` with the one-time key read from its file; nothing secret in the argv."""
+    """`tailscale up` with the one-time key read from its file; nothing secret in the argv.
+
+    No `--advertise-tags`: the tags come from the key alone, and enroll checks the ones the node
+    got. headscale refuses a tagged key that also asks for tags; Tailscale needs no asking.
+    """
     args = [
         "up",
         f"--auth-key=file:{auth_key_file}",
         f"--hostname={hostname}",
-        f"--advertise-tags={','.join(tags)}",
         "--accept-dns=false",
         "--accept-routes=false",
         "--ssh=false",

@@ -239,7 +239,6 @@ def join(
             daemon.socket,
             request.auth_key_file,
             request.hostname,
-            config.tailnet.tags,
             config.tailnet.login_server,
             request.timeout,
         )
