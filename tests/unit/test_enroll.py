@@ -2,8 +2,11 @@
 
 import dataclasses
 import json
+import os
 import re
+import signal
 import stat
+import threading
 from pathlib import Path
 
 import pytest
@@ -309,6 +312,61 @@ def test_a_previous_enrollment_survives_a_failed_replacement(box: Box) -> None:
     assert enroll(box, "--replace") == 2
     assert box.host.node_state.read_bytes() == before
     assert json.loads(box.host.node_file.read_text())["node_id"] == "n1CNTRL"
+
+
+def test_a_failed_install_puts_the_previous_enrollment_back(
+    box: Box, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tailnet_unlock import enroll as module
+
+    assert enroll(box) == 0
+    files = (box.host.node_state, box.host.node_file, box.host.pins_file)
+    before = [path.read_bytes() for path in files]
+
+    def fail(*args: object) -> None:
+        del args
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(module, "write_node", fail)
+    tsfake.set_scenario(box.bin, node_id="n2CNTRL")
+    box.write_key()
+    assert enroll(box, "--replace") == 2
+    assert [path.read_bytes() for path in files] == before
+    assert "logout" in tsfake.verbs(box.bin)
+    assert box.staging == []
+    capsys.readouterr()
+
+
+def test_a_key_file_with_another_link_is_refused(
+    box: Box, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (box.root / "other").hardlink_to(box.key)
+    assert enroll(box) == 2
+    assert "hard links" in capsys.readouterr().err
+    assert box.key.exists()
+
+
+def test_a_key_in_a_tools_message_is_masked(box: Box, capsys: pytest.CaptureFixture[str]) -> None:
+    from tailnet_unlock.tailscale import one_line
+
+    assert SECRET not in one_line(f"x\nbad key {SECRET} given")
+    assert "tskey-***" in one_line(f"bad key {SECRET}")
+
+
+@pytest.mark.parametrize("number", [signal.SIGTERM, signal.SIGHUP])
+def test_a_signal_while_joining_cleans_up_like_a_failure(
+    box: Box, capsys: pytest.CaptureFixture[str], number: signal.Signals
+) -> None:
+    tsfake.set_scenario(box.bin, never_running=True)
+    timer = threading.Timer(1.5, os.kill, (os.getpid(), number))
+    timer.start()
+    try:
+        with pytest.raises(SystemExit) as left:
+            enroll(box, "--timeout", "30")
+    finally:
+        timer.cancel()
+    assert left.value.code == 128 + number
+    assert_clean_failure(box, capsys)
 
 
 def test_enroll_after_rebuild_runs_the_rebuild_and_verify(

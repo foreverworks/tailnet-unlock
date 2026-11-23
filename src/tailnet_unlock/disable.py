@@ -50,7 +50,7 @@ def log_out(host: Host, timeout: int) -> bool:
                 tools, daemon, lambda status: status.backend_state == "Running", timeout, "the node"
             )
             done = logout(tools, daemon.socket)
-        except ToolError:
+        except BaseException:
             kill_daemon(daemon)
             raise
         try:

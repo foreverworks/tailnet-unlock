@@ -24,5 +24,6 @@ install -m 0755 "$i/post-update" "$dest/etc/initramfs/post-update.d/tailnet-unlo
 rm -rf "$dest/usr/lib/python3/dist-packages/tailnet_unlock"
 cp -r "$here/src/tailnet_unlock" "$dest/usr/lib/python3/dist-packages/"
 find "$dest/usr/lib/python3/dist-packages/tailnet_unlock" -name __pycache__ -prune -exec rm -rf {} +
-printf '#!/bin/sh\nexec python3 -m tailnet_unlock "$@"\n' >"$dest/usr/sbin/tailnet-unlock"
+# -I: neither the current directory, PYTHONPATH nor a user's site can put a module in front of ours
+printf '#!/bin/sh\nexec /usr/bin/python3 -I -m tailnet_unlock "$@"\n' >"$dest/usr/sbin/tailnet-unlock"
 chmod 0755 "$dest/usr/sbin/tailnet-unlock"

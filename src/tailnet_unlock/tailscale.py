@@ -14,6 +14,7 @@ reads itself, and the daemons get a minimal environment.
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -74,10 +75,7 @@ def find_tools() -> Tools:
 
 
 def binary_version(path: str | Path) -> Version | None:
-    """The version a Tailscale binary reports with `--version`, or None if it cannot say.
-
-    Also used on the tailscaled extracted from an initramfs image.
-    """
+    """The version a Tailscale binary reports with `--version`, or None if it cannot say."""
     try:
         result = subprocess.run(
             [str(path), "--version"],
@@ -131,12 +129,17 @@ def start_daemon(
     return Daemon(process, socket, log)
 
 
+def one_line(text: str) -> str:
+    """The last line of a tool's output, short, with anything shaped like a Tailscale key masked."""
+    lines = text.strip().splitlines()
+    return re.sub(r"tskey-[A-Za-z0-9-]+", "tskey-***", lines[-1])[:200] if lines else ""
+
+
 def last_log_line(log: Path) -> str:
     try:
-        lines = log.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+        return one_line(log.read_text(encoding="utf-8", errors="replace"))
     except OSError:
         return ""
-    return lines[-1][:200] if lines else ""
 
 
 def stop_daemon(daemon: Daemon, grace: float = 20.0) -> None:
@@ -285,8 +288,7 @@ def bring_up(
         args.append(f"--login-server={login_server}")
     code, _, err = run_cli(tools, socket, args, timeout + 30)
     if code != 0:
-        lines = err.strip().splitlines()
-        raise ToolError(f"tailscale up failed: {lines[-1][:200] if lines else code}")
+        raise ToolError(f"tailscale up failed: {one_line(err) or code}")
 
 
 def logout(tools: Tools, socket: Path, timeout: float = 30) -> bool:

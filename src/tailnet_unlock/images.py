@@ -2,19 +2,17 @@
 
 An image is unpacked with `unmkinitramfs` into a private tmpfs directory, read, and wiped: it holds
 the recovery key in the clear. What comes out is `ImageFacts`, plain data; the verdicts are
-`verify.py`'s. Nothing here calls Tailscale: the one thing that needs it, running the tailscaled an
-image carries, is a function the caller passes in.
+`verify.py`'s. Nothing an image carries is ever run: its tailscaled is compared with the installed
+one, byte for byte.
 """
 
-import os
+import filecmp
 import shlex
 import subprocess
-import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from tailnet_unlock.doorkey import remove_tree, require_tmpfs
+from tailnet_unlock.doorkey import reap_work_dirs, remove_tree, require_tmpfs, work_dir
 from tailnet_unlock.errors import ToolError
 from tailnet_unlock.sealedstate import sealed_problem
 from tailnet_unlock.system import Host
@@ -25,6 +23,18 @@ IMAGE_RECOVERY = "etc/tailnet-unlock/recovery_host_key"
 IMAGE_PIN = "etc/tailnet-unlock/door.tpm/pin"
 IMAGE_KEYS = "root/.ssh/authorized_keys"
 IMAGE_TAILSCALED = "usr/sbin/tailscaled"
+# what a door needs in the image, whatever its conf says; the sealed door needs its container too
+DOOR_FILES = (
+    *(f"usr/lib/tailnet-unlock/{name}" for name in ("door", "supervise", "unseal", "lib.sh")),
+    "usr/lib/tailnet-unlock/paths.sh",
+    "usr/sbin/dropbear",
+    "scripts/init-premount/tailnet-unlock",
+    IMAGE_KEYS,
+)
+CONTAINER_FILES = tuple(
+    f"etc/tailnet-unlock/door.tpm/{name}"
+    for name in ("format", "profile", "public", "private", "pin")
+)
 IGNORED_SUFFIXES = (".dpkg-bak", ".dpkg-new", ".dpkg-old", ".new", ".old", ".bak")
 
 
@@ -37,6 +47,7 @@ class Expected:
     recovery_key: bytes | None
     door_pin: str | None
     local_key_files: tuple[str, ...]
+    tailscaled: Path | None = None  # the installed binary an image's should equal
 
 
 @dataclass(frozen=True)
@@ -51,7 +62,7 @@ class ImageFacts:
     port: int | None
     profile: str
     conf_tailscaled_version: str
-    binary_tailscaled_version: str | None
+    tailscaled_current: bool | None
     has_tailscaled: bool
     has_state: bool
     state_sealed: bool | None
@@ -60,6 +71,7 @@ class ImageFacts:
     recovery_current: bool | None
     door_pin_current: bool | None
     local_key: bool
+    missing: tuple[str, ...]
 
 
 def parse_conf(text: str) -> dict[str, str]:
@@ -118,7 +130,6 @@ def facts_from_tree(
     image: Path,
     tree: Path,
     expected: Expected,
-    inspect_tailscaled: Callable[[Path], str | None],
 ) -> ImageFacts:
     conf_bytes = _read(tree, CONF)
     values = parse_conf(conf_bytes.decode("utf-8", "replace")) if conf_bytes is not None else {}
@@ -134,18 +145,29 @@ def facts_from_tree(
     carries_key = carries_key or any(
         (tree / name.lstrip("/")).is_file() for name in expected.local_key_files
     )
+    door = values.get("TU_DOOR", "none") if conf_bytes is not None else "none"
+    has_recovery = values.get("TU_HAS_RECOVERY") == "yes"
+    needed: tuple[str, ...] = ()
+    if door != "none":
+        needed = DOOR_FILES
+        needed += CONTAINER_FILES if door == "sealed" else ()
+        needed += (IMAGE_RECOVERY,) if has_recovery or door == "recovery" else ()
     return ImageFacts(
         path=str(image),
         kernel=kernel_of(image),
         conf_present=conf_bytes is not None,
-        door=values.get("TU_DOOR", "none") if conf_bytes is not None else "none",
-        recovery=values.get("TU_HAS_RECOVERY") == "yes",
+        door=door,
+        recovery=has_recovery,
         tailnet=values.get("TU_TAILNET_IN_IMAGE") == "yes",
         degraded=tuple(values.get("TU_DEGRADED", "").split()),
         port=int(port) if port.isdigit() else None,
         profile=values.get("TU_PROFILE", ""),
         conf_tailscaled_version=values.get("TU_TAILSCALED_VERSION", ""),
-        binary_tailscaled_version=inspect_tailscaled(tailscaled) if has_tailscaled else None,
+        tailscaled_current=(
+            None
+            if not has_tailscaled or expected.tailscaled is None
+            else filecmp.cmp(tailscaled, expected.tailscaled, shallow=False)
+        ),
         has_tailscaled=has_tailscaled,
         has_state=state is not None,
         state_sealed=None if state is None else sealed_problem(state) is None,
@@ -168,6 +190,7 @@ def facts_from_tree(
             else pin is not None and pin.decode("utf-8", "replace").strip() == expected.door_pin
         ),
         local_key=carries_key,
+        missing=tuple(name for name in needed if not (tree / name).is_file()),
     )
 
 
@@ -175,17 +198,16 @@ def read_image(
     host: Host,
     image: Path,
     expected: Expected,
-    inspect_tailscaled: Callable[[Path], str | None],
 ) -> ImageFacts:
     """Unpack, read the facts, wipe. The unpacked tree holds the recovery key in the clear."""
     host.run_dir.mkdir(parents=True, exist_ok=True)
     if host.require_tmpfs:
         require_tmpfs(host.run_dir)
-    work = Path(tempfile.mkdtemp(prefix="verify.", dir=host.run_dir))
+    reap_work_dirs(host.run_dir)
+    work = work_dir(host.run_dir, "verify")
     try:
-        os.chmod(work, 0o700)
         tree = unpack(host, image, work)
-        return facts_from_tree(image, tree, expected, inspect_tailscaled)
+        return facts_from_tree(image, tree, expected)
     finally:
         remove_tree(work)
 

@@ -146,7 +146,7 @@ def enrolled(door_box: Box, monkeypatch: pytest.MonkeyPatch) -> tuple[Box, bytes
 
 
 def healthy(node_state: bytes, **changes: object) -> Tree:
-    base = Tree(tailnet=True, tailscaled="1.104.7", conf_version="1.104.7", state=node_state)
+    base = Tree(tailnet=True, tailscaled="installed", conf_version="1.104.7", state=node_state)
     return Tree(**{**base.__dict__, **changes})
 
 
@@ -177,7 +177,13 @@ def test_an_enrolled_box_with_a_tailnet_image_is_ok(
         ({"state": tsfake.sealed_state().replace(b"cHJpdmF0ZQ==", b"b3RoZXI=")}, "state-stale", ()),
         ({"tailscaled": "1.80.0", "conf_version": "1.80.0"}, "version-below-floor", ()),
         ({}, "version-below-floor", ("--tailscale-floor", "1.200.0")),
-        ({"conf_version": "1.90.0"}, "version-mismatch", ()),
+        ({"conf_version": ""}, "version-unknown", ()),
+        ({"tailscaled": "another build"}, "tailscaled-differs", ()),
+        ({"tailscaled": None}, "tailnet-incomplete", ()),
+        ({"state": None}, "tailnet-incomplete", ()),
+        ({"without": ("usr/sbin/dropbear",)}, "door-incomplete", ()),
+        ({"without": ("usr/lib/tailnet-unlock/door",)}, "door-incomplete", ()),
+        ({"recovery_key": None}, "door-incomplete", ()),
         ({"tailscaled": "1.100.0", "conf_version": "1.100.0"}, "version-older-than-installed", ()),
         ({"door": "recovery", "pin": None}, "sealed-door-absent", ()),
         ({"pin": "ssh-ed25519 AAAAdifferent"}, "door-pin-differs", ()),
@@ -261,6 +267,48 @@ def test_text_output_names_each_problem(door_box: Box, capsys: pytest.CaptureFix
     assert "PROBLEMS" in text
     assert "keys-stale:" in text
     assert "verify found problems" in text
+
+
+def test_text_output_says_when_an_image_boots_without_the_door(
+    door_box: Box, capsys: pytest.CaptureFixture[str]
+) -> None:
+    set_tailnet(door_box, False)
+    tree = Tree(extra_files={"etc/zfs/keys/rpool.key": b"0" * 32})
+    add_image(door_box.host, KERNEL, tree, door_box.root / "trees")
+    assert cli.main(["verify"]) == 0
+    assert "boots without the door" in capsys.readouterr().out
+
+
+def test_verify_never_runs_what_an_image_carries(
+    enrolled: tuple[Box, bytes], capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    door_box, state = enrolled
+    ran = tmp_path / "ran"
+    trap = f"#!/bin/sh\ntouch {ran}\necho 1.104.7\n".encode()
+    tree = healthy(state, tailscaled=None, extra_files={"usr/sbin/tailscaled": trap})
+    root = add_image(door_box.host, KERNEL, tree, door_box.root / "trees").read_text()
+    (Path(root) / "usr/sbin/tailscaled").chmod(0o755)
+    code, result = run_verify(capsys)
+    assert code == 1
+    assert f"initrd.img-{KERNEL}: tailscaled-differs" in problems_of(result)
+    assert not ran.exists()
+
+
+def test_what_a_killed_run_left_is_wiped_and_a_running_one_is_not(
+    door_box: Box, capsys: pytest.CaptureFixture[str]
+) -> None:
+    set_tailnet(door_box, False)
+    add_image(door_box.host, KERNEL, Tree(), door_box.root / "trees")
+    run = door_box.host.run_dir
+    dead = run / "verify.999999999.abc"
+    alive = run / f"enroll.{os.getpid()}.abc"
+    for path in (dead, alive):
+        path.mkdir(parents=True)
+        (path / "secret").write_text("x")
+    assert cli.main(["verify"]) == 0
+    capsys.readouterr()
+    assert not dead.exists()
+    assert alive.exists()
 
 
 def test_verify_needs_a_configured_box(door_box: Box, capsys: pytest.CaptureFixture[str]) -> None:

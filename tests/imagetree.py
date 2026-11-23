@@ -5,13 +5,13 @@ all `verify` asks of the real one. The container tier checks the same code on re
 """
 
 import shutil
-import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from keys import DOOR_PIN
 from tailnet_unlock.authorized_keys import read_authorized_keys
 from tailnet_unlock.container import Container, write_container
+from tailnet_unlock.images import DOOR_FILES
 from tailnet_unlock.system import Host
 from tsfake import sealed_state
 
@@ -35,7 +35,7 @@ class Tree:
     recovery: bool = True
     tailnet: bool = False
     degraded: str = ""
-    tailscaled: str | None = None  # the version the carried tailscaled prints, None: no binary
+    tailscaled: str | None = None  # its content ("installed": the box's own), None: no binary
     conf_version: str = ""
     state: bytes | None = None
     pin: str | None = DOOR_PIN
@@ -43,6 +43,7 @@ class Tree:
     recovery_key: bytes | None = b"recovery-key"
     extra_files: dict[str, bytes] = field(default_factory=dict)
     conf: bool = True
+    without: tuple[str, ...] = ()  # door files the image lacks
 
 
 def write_tree(host: Host, where: Path, tree: Tree) -> Path:
@@ -62,8 +63,16 @@ def write_tree(host: Host, where: Path, tree: Tree) -> Path:
         )
     etc = root / "etc" / "tailnet-unlock"
     etc.mkdir(parents=True)
+    if tree.door != "none" and tree.conf:
+        for name in DOOR_FILES:
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists() and name not in tree.without:
+                path.write_text("x")
     if tree.pin is not None:
         (etc / "door.tpm").mkdir()
+        for name in ("format", "profile", "public", "private"):
+            (etc / "door.tpm" / name).write_text("x")
         (etc / "door.tpm" / "pin").write_text(tree.pin + "\n")
     if tree.recovery_key is not None and tree.recovery:
         (etc / "recovery_host_key").write_bytes(tree.recovery_key)
@@ -71,9 +80,12 @@ def write_tree(host: Host, where: Path, tree: Tree) -> Path:
         (etc / "unlock.state").write_bytes(tree.state)
     if tree.tailscaled is not None:
         binary = root / "usr" / "sbin" / "tailscaled"
-        binary.parent.mkdir(parents=True)
-        binary.write_text(f"#!/bin/sh\necho {tree.tailscaled}\n")
-        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        installed = shutil.which("tailscaled")
+        if tree.tailscaled == "installed" and installed is not None:
+            shutil.copy(installed, binary)
+        else:
+            binary.write_text(f"not the installed one: {tree.tailscaled}\n")
     for name, data in tree.extra_files.items():
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)

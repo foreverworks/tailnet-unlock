@@ -10,7 +10,8 @@
     "tag:keyholder": ["autogroup:admin"],
   },
   "grants": [
-    // Operators and keyholders reach the door's port, nothing else on it.
+    // Operators and keyholders reach the door's port, nothing else on it. 2222 is the default of
+    // door.port in box.toml: write yours here and in the tests below if you changed it.
     {"src": ["group:unlock-operators", "tag:keyholder"], "dst": ["tag:unlock"], "ip": ["tcp:2222"]},
     // No grant names tag:unlock as a source: a door reaches nothing.
   ],

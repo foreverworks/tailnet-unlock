@@ -154,9 +154,10 @@ def _cmd_pins(args: argparse.Namespace) -> int:
     return 0
 
 
-def _on_term(signum: int, frame: object) -> None:
-    del signum, frame
-    raise SystemExit(143)
+def _on_signal(signum: int, frame: object) -> None:
+    """A closed terminal or a stop leaves through the same cleanup as an error does."""
+    del frame
+    raise SystemExit(128 + signum)
 
 
 def _check_after_rebuild(host: Host, config: BoxConfig, tailnet_expected: bool) -> int:
@@ -178,7 +179,6 @@ def _check_after_rebuild(host: Host, config: BoxConfig, tailnet_expected: bool) 
 def _cmd_enroll(args: argparse.Namespace) -> int:
     host = _host(args)
     config = _load_config(host)
-    signal.signal(signal.SIGTERM, _on_term)
     request = EnrollRequest(
         auth_key_file=Path(args.auth_key_file),
         replace=args.replace,
@@ -409,6 +409,8 @@ def parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    for number in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, _on_signal)
     try:
         code: int = args.handler(args)
     except (ConfigError, DoorKeyError, TpmError, ToolError, OSError) as error:

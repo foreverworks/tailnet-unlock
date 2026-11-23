@@ -25,6 +25,8 @@ initramfs-tools.
   `tailscaled` changes and never fails the upgrade. The package refuses to be removed or purged
   while the box unlocks through its door, rebuilds the images without the door once it is removed, and
   conflicts with `dropbear-initramfs`.
+- `examples/policy.hujson`: a tailnet policy with tests, where the doors reach nothing and only
+  operators and keyholders reach them.
 - Release assets: the package, a source archive and `SHA256SUMS`, with build provenance. The package
   is reproducible: the same commit gives the same bytes.
 

@@ -2,12 +2,11 @@
 
 Two checks per image, kept apart. `door_problems` is about the uplink door and needs nothing of
 Tailscale; `tailnet_problems` is about the tailnet door and runs only on facts and versions it is
-given. This module never imports `tailscale.py`: the versions it compares are arguments, so a box
+given. This module never imports `tailscale.py`: what it compares with is an argument, so a box
 with `tailnet.enabled = false` and no Tailscale package verifies like any other.
 """
 
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,17 +35,19 @@ TAILNET_DEGRADED = frozenset(
 
 MESSAGES = {
     "door-absent": "the image carries no door",
+    "door-incomplete": "the image says it has a door but lacks files the door needs",
     "sealed-door-absent": "a sealed door key exists but the image carries no sealed door",
     "door-pin-differs": "the image's sealed door key is not the one on the box",
     "degraded": "the build reported a degradation (see degraded)",
     "keys-stale": "the image's authorized_keys differ from what the box would render now",
     "recovery-key-stale": "the image's recovery key is not the box's",
     "tailnet-absent": "the unlock node is enrolled but the image carries no tailnet door",
+    "tailnet-incomplete": "the image says it has a tailnet door but lacks tailscaled or its state",
     "tailnet-unexpected": "the image carries tailscaled or node state but the tailnet door is off",
     "state-unsealed": "the image's node state is not Tailscale's sealed store",
     "state-stale": "the image's node state differs from the box's",
-    "version-mismatch": "the version in the image's conf differs from the tailscaled it carries",
-    "version-unknown": "the tailscaled in the image does not report a version",
+    "tailscaled-differs": "the image's tailscaled is not the installed one of its version",
+    "version-unknown": "the image's conf does not say which tailscaled it carries",
     "version-below-floor": "the image's tailscaled is older than the floor",
     "version-older-than-installed": "the image's tailscaled is older than the installed one",
     "tailnet-not-enrolled": "tailnet.enabled is true but the unlock node is not enrolled",
@@ -62,6 +63,7 @@ class TailnetView:
     enrolled: bool
     floor: Version
     installed: Version | None
+    tailscaled: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,8 @@ def door_problems(facts: ImageFacts) -> list[str]:
             problems.append("sealed-door-absent")
         elif not facts.door_pin_current:
             problems.append("door-pin-differs")
+    if facts.missing:
+        problems.append("door-incomplete")
     if any(code not in TAILNET_DEGRADED for code in facts.degraded):
         problems.append("degraded")
     if facts.keys_current is False:
@@ -107,6 +111,8 @@ def tailnet_problems(facts: ImageFacts, view: TailnetView) -> list[str]:
     wanted = view.enabled and view.enrolled
     if wanted and not facts.tailnet:
         problems.append("tailnet-absent")
+    if facts.tailnet and not (facts.has_tailscaled and facts.has_state):
+        problems.append("tailnet-incomplete")
     if not wanted and (facts.has_tailscaled or facts.has_state):
         problems.append("tailnet-unexpected")
     if facts.has_state and facts.state_sealed is False:
@@ -115,20 +121,15 @@ def tailnet_problems(facts: ImageFacts, view: TailnetView) -> list[str]:
         problems.append("state-stale")
     if facts.has_tailscaled:
         in_conf = parse_version(facts.conf_tailscaled_version)
-        in_binary = (
-            None
-            if facts.binary_tailscaled_version is None
-            else parse_version(facts.binary_tailscaled_version)
-        )
-        if in_binary is None:
+        if in_conf is None:
             problems.append("version-unknown")
         else:
-            if in_conf != in_binary:
-                problems.append("version-mismatch")
-            if in_binary < view.floor:
+            if in_conf < view.floor:
                 problems.append("version-below-floor")
-            elif view.installed is not None and in_binary < view.installed:
+            elif view.installed is not None and in_conf < view.installed:
                 problems.append("version-older-than-installed")
+            if facts.tailscaled_current is False and in_conf == view.installed:
+                problems.append("tailscaled-differs")
     return problems
 
 
@@ -145,14 +146,13 @@ def image_json(report: ImageReport) -> dict[str, object]:
         "degraded": list(facts.degraded),
         "port": facts.port,
         "profile": facts.profile,
-        "tailscaled_version": facts.binary_tailscaled_version
-        or facts.conf_tailscaled_version
-        or None,
-        "conf_tailscaled_version": facts.conf_tailscaled_version or None,
+        "tailscaled_version": facts.conf_tailscaled_version or None,
+        "tailscaled_current": facts.tailscaled_current,
         "state_sealed": facts.state_sealed,
         "state_identical": facts.state_identical,
         "authorized_keys_current": facts.keys_current,
         "local_key": facts.local_key,
+        "missing": list(facts.missing),
         "problems": list(report.problems),
     }
 
@@ -174,7 +174,7 @@ def _optional(path: Path) -> bytes | None:
         return None
 
 
-def load_expected(host: Host) -> Expected:
+def load_expected(host: Host, tailscaled: Path | None) -> Expected:
     """What the box's own files say an image should carry."""
     try:
         pin: str | None = read_container(host.door_dir / DOOR_CONTAINER).pin
@@ -186,17 +186,23 @@ def load_expected(host: Host) -> Expected:
         recovery_key=_optional(host.door_dir / RECOVERY_KEY),
         door_pin=pin,
         local_key_files=local_key_files(),
+        tailscaled=tailscaled,
     )
 
 
 def tailnet_view(
-    host: Host, config: BoxConfig, floor: Version, installed: Version | None
+    host: Host,
+    config: BoxConfig,
+    floor: Version,
+    installed: Version | None,
+    tailscaled: Path | None,
 ) -> TailnetView:
     return TailnetView(
         enabled=config.tailnet.enabled,
         enrolled=node_enrolled(host),
         floor=floor,
         installed=installed,
+        tailscaled=tailscaled,
     )
 
 
@@ -204,11 +210,10 @@ def verify_images(
     host: Host,
     view: TailnetView,
     allow_unenrolled: bool,
-    inspect_tailscaled: Callable[[Path], str | None],
     boot_dir: Path | None = None,
 ) -> VerifyResult:
     """Check every image on /boot: the door first, then the tailnet part."""
-    expected = load_expected(host)
+    expected = load_expected(host, view.tailscaled)
     images: list[ImageReport] = []
     problems: list[str] = []
     if view.enabled and not view.enrolled and not allow_unenrolled:
@@ -218,7 +223,7 @@ def verify_images(
         problems.append("no-images")
     for path in found:
         try:
-            facts = read_image(host, path, expected, inspect_tailscaled)
+            facts = read_image(host, path, expected)
         except (ToolError, OSError) as error:
             images.append(ImageReport(str(path), None, ("unreadable",), str(error)))
             problems.append(f"{path.name}: unreadable ({error})")
@@ -250,8 +255,12 @@ def render_text(result: VerifyResult) -> str:
             lines.append(
                 f"  door {facts.door}, recovery {'yes' if facts.recovery else 'no'}, tailnet "
                 f"{'yes' if facts.tailnet else 'no'}, tailscaled "
-                f"{facts.binary_tailscaled_version or facts.conf_tailscaled_version or 'none'}"
+                f"{facts.conf_tailscaled_version or 'none'}"
             )
+            if facts.local_key:
+                lines.append("  a ZFS key file is in this image: it boots without the door")
+            if facts.missing:
+                lines.append(f"  missing: {', '.join(facts.missing)}")
         for code in report.problems:
             lines.append(f"  {code}: {MESSAGES.get(code, report.error)}")
     for code in ("tailnet-not-enrolled", "no-images"):

@@ -10,17 +10,24 @@ end, success or failure, and nothing secret goes through a command line, the env
 output.
 """
 
+import contextlib
 import os
 import shutil
 import stat
-import tempfile
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from tailnet_unlock.boxpins import known_uplink, pins_text
 from tailnet_unlock.config import BoxConfig
-from tailnet_unlock.doorkey import remove_tree, require_tmpfs, wipe_file
+from tailnet_unlock.doorkey import (
+    reap_work_dirs,
+    remove_tree,
+    require_tmpfs,
+    wipe_file,
+    work_dir,
+)
 from tailnet_unlock.errors import ConfigError, ToolError
 from tailnet_unlock.node import Node, read_node, write_node
 from tailnet_unlock.sealedstate import sealed_problem
@@ -67,6 +74,8 @@ def check_auth_key_file(host: Host, path: Path) -> None:
         raise ToolError(f"{path}: {error.strerror or error}") from error
     if not stat.S_ISREG(info.st_mode):
         raise ToolError(f"{path}: not a regular file")
+    if info.st_nlink != 1:
+        raise ToolError(f"{path}: has other hard links, which deleting it would leave behind")
     owner = 0 if host.require_root else os.geteuid()
     if info.st_uid != owner:
         raise ToolError(f"{path}: must be owned by {'root' if owner == 0 else 'the caller'}")
@@ -77,16 +86,20 @@ def check_auth_key_file(host: Host, path: Path) -> None:
 
 
 def shred(path: Path) -> None:
-    """Overwrite and delete; a file that is still there afterwards is an error to report."""
+    """Overwrite and delete. A file that is still there afterwards is said and changes nothing else:
+    neither the error that led here nor an enrollment that worked."""
     try:
         if path.is_symlink():
             path.unlink()
         elif path.exists():
             wipe_file(path)
     except OSError:
-        path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
     if path.exists():
-        raise ToolError(f"{path}: could not delete the auth key file")
+        print(
+            f"tailnet-unlock: warning: could not delete the auth key file {path}", file=sys.stderr
+        )
 
 
 def require_ready(host: Host, config: BoxConfig) -> None:
@@ -138,7 +151,8 @@ def staging_dir(host: Host) -> Path:
     host.run_dir.mkdir(parents=True, exist_ok=True)
     if host.require_tmpfs:
         require_tmpfs(host.run_dir)
-    return Path(tempfile.mkdtemp(prefix="enroll.", dir=host.run_dir))
+    reap_work_dirs(host.run_dir)
+    return work_dir(host.run_dir, "enroll")
 
 
 def check_joined(status: NodeStatus, config: BoxConfig) -> None:
@@ -187,6 +201,26 @@ def install(host: Host, config: BoxConfig, staging: Path, node: Node) -> None:
     atomic_write(host.pins_file, text.encode("utf-8"), 0o644)
 
 
+def installed_files(host: Host) -> tuple[Path, ...]:
+    return (host.node_state, host.node_file, host.pins_file)
+
+
+def read_optional(path: Path) -> bytes | None:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def restore(before: dict[Path, bytes | None]) -> None:
+    """Put back what the box had before a failed install: the old enrollment, or nothing."""
+    for path, data in before.items():
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            atomic_write(path, data, 0o600 if path.name == "unlock.state" else 0o644)
+
+
 def join(
     host: Host, config: BoxConfig, tools: Tools, staging: Path, request: EnrollRequest
 ) -> Node:
@@ -195,7 +229,7 @@ def join(
     daemon: Daemon | None = None
     attempted = False
     node_id = ""
-    installed = False
+    before: dict[Path, bytes | None] | None = None
     try:
         daemon = start_daemon(tools, state, staging / "tailscaled.sock", log, host.encrypt_state)
         wait_for(tools, daemon, lambda _: True, request.timeout, "tailscaled to answer")
@@ -231,13 +265,12 @@ def join(
             login_server=config.tailnet.login_server,
             enrolled_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
-        installed = True
+        before = {path: read_optional(path) for path in installed_files(host)}
         install(host, config, staging, node)
         return node
     except BaseException as error:
-        if installed:
-            host.node_file.unlink(missing_ok=True)
-            host.node_state.unlink(missing_ok=True)
+        if before is not None:
+            restore(before)
         note = ""
         if attempted:
             note = roll_back(host, tools, staging, daemon, node_id)
@@ -271,7 +304,13 @@ def roll_back(host: Host, tools: Tools, staging: Path, daemon: Daemon | None, no
                 staging / "rollback.log",
                 host.encrypt_state,
             )
-            wait_for(tools, daemon, lambda _: True, 60, "tailscaled to answer for the logout")
+            wait_for(
+                tools,
+                daemon,
+                lambda _: True,
+                host.logout_timeout,
+                "tailscaled to answer for the logout",
+            )
         if daemon is not None and logout(tools, daemon.socket):
             return ""
     except ToolError:
@@ -279,8 +318,9 @@ def roll_back(host: Host, tools: Tools, staging: Path, daemon: Daemon | None, no
     finally:
         if started is not None:
             end_daemon(started, host.stop_grace)
-    named = f" {node_id}" if node_id else ""
-    return f"the logout failed: delete the node{named} in the Tailscale admin console"
+    if not node_id:
+        return "if a node was registered, delete it in the Tailscale admin console"
+    return f"the logout failed: delete the node {node_id} in the Tailscale admin console"
 
 
 def enroll(host: Host, config: BoxConfig, request: EnrollRequest) -> EnrollResult:
@@ -294,6 +334,8 @@ def enroll(host: Host, config: BoxConfig, request: EnrollRequest) -> EnrollResul
         old = existing.node_id if existing is not None else None
         if not host.tpm_device.exists():
             raise ToolError(f"no TPM at {host.tpm_device}: the unlock node's state needs one")
+        # the pins are written after the join: a door key they cannot read is found out before it
+        pins_text(host.door_dir, config.door.port, None, None, need_door=False)
         tools = find_tools()
         require_floor(tools)
         staging = staging_dir(host)

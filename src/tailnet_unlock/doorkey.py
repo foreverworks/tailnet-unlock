@@ -13,6 +13,7 @@ import hashlib
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from tailnet_unlock.errors import DoorKeyError, ToolError
@@ -167,6 +168,22 @@ def private_workdir(parent: Path, allow_swap: bool = False) -> Path:
     work = parent / f"tailnet-unlock.{os.getpid()}.{os.urandom(6).hex()}"
     work.mkdir(mode=0o700)
     return work
+
+
+def work_dir(parent: Path, kind: str) -> Path:
+    """A 0700 directory below `parent` named after this process, so a later run can tell one whose
+    process died before it could wipe it."""
+    return Path(tempfile.mkdtemp(prefix=f"{kind}.{os.getpid()}.", dir=parent))
+
+
+def reap_work_dirs(parent: Path) -> None:
+    """Wipe what a killed run left behind: the `work_dir`s whose process is gone."""
+    for path in parent.glob("*.*.*"):
+        kind, pid, _ = path.name.split(".", 2)
+        if kind not in ("enroll", "verify") or not pid.isdigit() or path.is_symlink():
+            continue
+        if path.is_dir() and not Path("/proc", pid).exists():
+            remove_tree(path)
 
 
 def remove_tree(path: Path) -> None:

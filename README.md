@@ -145,7 +145,8 @@ box that still boots the way it did.
    write down and give to whoever will unlock.
 3. **Join the tailnet** (skip this if `tailnet.enabled = false`). In the Tailscale admin console,
    make a one-use, pre-approved, non-ephemeral auth key tagged `tag:unlock`, and save it to a file
-   that only root can read. Write a policy where nothing but your keyholders and operators can reach
+   in `/run` that only root can read (`/run` is in memory: on ZFS, overwriting a file does not erase
+   it). Write a policy where nothing but your keyholders and operators can reach
    the door's port, and the door reaches nothing (section 7.5 of the design has an example). Then
    `sudo tailnet-unlock enroll --auth-key-file <file>`. It starts a second `tailscaled` of its own,
    joins as `<host>-unlock`, checks that the node's state is sealed by the TPM and that it opens again,
@@ -157,7 +158,7 @@ box that still boots the way it did.
 At this point the box has a door in its images, but if its root still has a key file, the root unlocks
 by itself as before and nobody asks the door anything. **To actually use the door** you move the root
 to a prompt: `zfs set keylocation=prompt <encryption root>`, then `update-initramfs -u -k all` and
-`tailnet-unlock verify`. Version 0.1.0 does not do this for you, and does not have the rehearsal that
+`tailnet-unlock verify`, which also says when an image still holds a key file. Version 0.1.0 does not do this for you, and does not have the rehearsal that
 falls back to the old key if the door fails. So: keep the key file, and a copy of the key somewhere
 safe, until you have rebooted once and unlocked through the door yourself. If that goes wrong, the
 console prompt takes the same key.
@@ -327,7 +328,8 @@ Each item says whether it exists in the repository today.
 - A small, documented approver contract (JSON in, JSON out): the contract is built as code and
   tests. The complete approver that needs nothing but SSH is not built.
 - An example tailnet policy, with tests, where the door can reach nothing and only your keyholders and
-  operators can reach the door. Not written; section 7.5 of the design has the shape.
+  operators can reach the door: `examples/policy.hujson`, which the VM tests load. Section 7.5 of the
+  design explains it.
 - Fallbacks: the box's own address when the tailnet is down, the recovery door after a TPM clear
   where you enabled it and can reach it, and the console. For a box behind NAT whose TPM failed, the
   console is the only way back. The uplink door, the recovery door and the console prompt are built.

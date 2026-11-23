@@ -1038,7 +1038,7 @@ a half-configured package; `verify` then reports the stale image. A package inst
 not configured changes nothing about its boot.
 
 **Removal guard** (decision D29): `prerm` refuses `remove` and `purge` while the box is enrolled: the
-door container exists (`/var/lib/tailnet-unlock/door/door.tpm`) and `zfs get keylocation` reports an
+door container or the recovery key exists (in `/var/lib/tailnet-unlock/door`) and `zfs get keylocation` reports an
 encryption root at `prompt`. It says what to do first (give the pool its key file back, rebuild the
 images, reboot once, then remove): removing the hooks would leave the next initramfs without a door.
 A box without `zfs` is not refused; one where `zfs` fails is, because the guard cannot tell. Upgrades
@@ -1147,7 +1147,8 @@ on a usage, configuration or tool error):
   error), starts tailscaled once more on a copy of the state with no key, which only reaches
   `Running` if the TPM unseals it as the boot will, and stops it. Then it installs the state and
   records `tailnet/node.json` (public) and `pins.toml`. `FILE` is overwritten and deleted whether
-  it succeeds or not, the staging directory (a 0700 directory on the tmpfs `/run`) is wiped, and
+  it succeeds or not (so a refusal such as "no TPM" spends it too; overwriting means little on a
+  copy-on-write filesystem, so the file belongs on a tmpfs such as `/run`, and the key is single use), the staging directory (a 0700 directory on the tmpfs `/run`) is wiped, and
   no key or state goes through an argument, the environment or the output. After any failure that
   follows the join, `tailscale logout` is tried, so no half-enrolled node returns; if that fails,
   the error names the node to delete. A box that is already enrolled with a sealed state is left
@@ -1157,10 +1158,10 @@ on a usage, configuration or tool error):
 - `verify [--json] [--tailscale-floor X.Y.Z] [--boot-dir DIR] [--allow-unenrolled]` unpacks every
   `/boot/initrd.img-*` into a private tmpfs directory, wipes it afterwards, and reports per image
   the door (sealed, recovery or none), the tailnet, the degradations, the port, the profile, the
-  version of tailscaled (from the conf and from running the binary the image carries, which must
-  agree), whether the state is sealed and the box's own, whether the authorized keys and the
+  version of tailscaled the hook recorded, whether the binary is byte for byte the installed one
+  (nothing from an image is run), whether the state is sealed and the box's own, whether the authorized keys and the
   recovery key are the ones the box would render now, and whether the image holds a ZFS key file.
-  Exit 1 lists the problems, such as `tailnet-absent`, `tailnet-unexpected`, `state-unsealed`,
+  Exit 1 lists the problems, such as `door-incomplete`, `tailnet-absent`, `tailnet-incomplete`, `tailnet-unexpected`, `state-unsealed`,
   `version-below-floor`, `sealed-door-absent` or `degraded`; a local key alone is not one. The door
   checks and the tailnet checks are separate: a box with the tailnet off and no Tailscale installed
   verifies like any other.
@@ -1291,7 +1292,7 @@ tests/initramfs/  real images from mkinitramfs, the degraded builds, the door ru
 tests/vm/         the harness, one TCG boot, the KVM scenarios and the guest's provisioning
 tests/package/    the .deb installed, upgraded, removed and purged with apt in the test container
 tests/container/  the Debian 13 test image (packages from Debian itself)
-examples/         box.toml; planned: keyholder.toml, policy.hujson, approver scripts
+examples/         box.toml, policy.hujson; planned: keyholder.toml, approver scripts
 packaging/        the .deb's control file, maintainer scripts, triggers and conffiles
 ```
 

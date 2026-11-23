@@ -17,6 +17,7 @@ import pytest
 
 from imagekit import CONFIG, STATE, Installed, build, install_box
 from imagetree import configure_node
+from keys import openssh_line
 from tailnet_unlock import cli
 from tailnet_unlock.system import Host
 from tsfake import sealed_state
@@ -94,7 +95,7 @@ def test_an_enrolled_image_verifies_and_each_staleness_is_found(
     assert image["port"] == 2222
     assert image["profile"] == "tpm"
     assert str(image["tailscaled_version"]).startswith("1.")
-    assert image["tailscaled_version"] == image["conf_tailscaled_version"]
+    assert image["tailscaled_current"] is True
     assert image["state_sealed"] is True
     assert image["state_identical"] is True
     assert image["authorized_keys_current"] is True
@@ -116,7 +117,9 @@ def test_an_enrolled_image_verifies_and_each_staleness_is_found(
     # the keyholders change after the image was built: stale keys
     keys = CONFIG / "delivery_keys"
     original = keys.read_text()
-    keys.write_text(original + original.replace("keyholder", "second").replace("K", "L", 5))
+    keys.write_text(
+        original + openssh_line("ssh-ed25519", (32).to_bytes(4, "big") + b"S" * 32) + "\n"
+    )
     try:
         result = verify(boot, capsys)
         assert f"initrd.img-{installed.kernel}: keys-stale" in problems_of(result)

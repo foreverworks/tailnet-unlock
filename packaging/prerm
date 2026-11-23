@@ -1,11 +1,12 @@
 #!/bin/sh
 # Refuse to remove the package while the box unlocks through its door: without the hook the next
 # initramfs has no door, and a box with a root key that lives nowhere on it would wait at a console
-# nobody may be able to reach. "Enrolled" means a sealed door exists and an encryption root asks for
-# its key at the prompt. Upgrades, and every other action, are never refused.
+# nobody may be able to reach. "Enrolled" means a door key exists, sealed or recovery, and an
+# encryption root asks for its key at the prompt. Upgrades, and every other action, are never refused.
 set -e
 
 DOOR=/var/lib/tailnet-unlock/door/door.tpm
+RECOVERY=/var/lib/tailnet-unlock/door/recovery_host_key
 
 refuse() {
 	cat >&2 <<MSG
@@ -20,7 +21,7 @@ MSG
 
 case "$1" in
 remove | purge)
-	[ -e "$DOOR" ] || exit 0
+	[ -e "$DOOR" ] || [ -e "$RECOVERY" ] || exit 0
 	command -v zfs >/dev/null 2>&1 || exit 0
 	if ! locations=$(zfs get -H -o value -t filesystem,volume keylocation 2>/dev/null); then
 		refuse "a door is installed and zfs cannot tell whether a root asks for its key at the prompt"

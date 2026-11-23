@@ -269,6 +269,36 @@ def test_removal_is_refused_while_the_box_is_enrolled(debs: dict[str, Path]) -> 
         assert DOOR.exists()
 
 
+def test_removal_is_refused_when_only_the_recovery_door_exists(debs: dict[str, Path]) -> None:
+    assert apt_install(debs["0.1.0"]).returncode == 0
+    enroll_on_disk()
+    shutil.rmtree(DOOR)
+    (DOOR.parent / "recovery_host_key").write_bytes(b"x")
+    done = sh("dpkg", "--remove", "tailnet-unlock", fake_zfs=True)
+    assert done.returncode != 0
+    assert installed()
+
+
+def test_the_command_ignores_modules_in_the_current_directory(
+    debs: dict[str, Path], tmp_path: Path
+) -> None:
+    assert apt_install(debs["0.1.0"]).returncode == 0
+    (tmp_path / "tailnet_unlock").mkdir()
+    (tmp_path / "tailnet_unlock" / "__init__.py").write_text("")
+    (tmp_path / "tailnet_unlock" / "__main__.py").write_text("print('planted')\n")
+    (tmp_path / "json.py").write_text("print('planted')\n")
+    done = subprocess.run(
+        ["/usr/sbin/tailnet-unlock", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        env=dict(os.environ, PYTHONPATH=str(tmp_path)),
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "0.1.0"
+
+
 def test_removal_is_refused_when_zfs_cannot_say(debs: dict[str, Path]) -> None:
     assert apt_install(debs["0.1.0"]).returncode == 0
     enroll_on_disk()
