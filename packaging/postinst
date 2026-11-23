@@ -1,0 +1,22 @@
+#!/bin/sh
+# Rebuild the initramfs images, but only on a box that has been set up (box.toml exists), and never
+# fail the package for it: a kernel or Tailscale upgrade must not be blocked by this project. A
+# failed rebuild leaves each image as it was and says so on stderr.
+set -e
+
+rebuild() {
+	[ -f /etc/tailnet-unlock/box.toml ] || return 0
+	if ! command -v update-initramfs >/dev/null 2>&1; then
+		echo "W: tailnet-unlock: update-initramfs not found; images not rebuilt" >&2
+		return 0
+	fi
+	if ! update-initramfs -u -k all; then
+		echo "W: tailnet-unlock: update-initramfs -u -k all failed; the images were not all rebuilt, run it by hand and check with 'tailnet-unlock verify'" >&2
+	fi
+}
+
+case "$1" in
+configure | triggered) rebuild ;;
+*) ;;
+esac
+exit 0

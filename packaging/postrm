@@ -1,0 +1,19 @@
+#!/bin/sh
+# Python writes bytecode next to the package when root runs it; dpkg does not know those files and
+# would leave the directories behind. Purge removes the box's configuration and state.
+set -e
+
+case "$1" in
+remove | purge)
+	rm -rf /usr/lib/python3/dist-packages/tailnet_unlock
+	;;
+*) ;;
+esac
+
+case "$1" in
+purge)
+	rm -rf /var/lib/tailnet-unlock /etc/tailnet-unlock
+	;;
+*) ;;
+esac
+exit 0

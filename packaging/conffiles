@@ -1,0 +1,2 @@
+/etc/initramfs/post-update.d/tailnet-unlock
+/etc/zfs/initramfs-tools-load-key.d/tailnet-unlock

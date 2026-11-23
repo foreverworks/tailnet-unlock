@@ -1,10 +1,10 @@
 # tailnet-unlock: design
 
-Status: a design with its first parts built. The door, the sealing of its key to the TPM, the
-initramfs hook and boot scripts, and the configuration rendering are built and tested in a Debian 13
-container, including one real boot under QEMU TCG. The virtual machine scenarios that need KVM are
-written and have not been run. Enrollment, delivery, the keyholder commands, the Debian packages, the
-dracut module, the `measured` profile and the LUKS backend are not built. Section 16 lists each
+Status: version 0.1.0, the box side, is built. The uplink door, the sealing of its key to the TPM, the
+initramfs hook and boot scripts, the tailnet door with `enroll`, `verify`, `status` and `disable
+--tailnet`, and the Debian package are tested in a Debian 13 container (including one real boot under
+QEMU TCG), and the virtual machine scenarios pass in CI. Delivery, the keyholder commands, the safe
+test reboot, `rotate`, the dracut module, the `measured` profile and the LUKS backend are not built. Section 16 lists each
 feature with its state; section 17 holds the versions the design was written against (read on
 2026-11-21), and section 19 holds the settled decisions, the hazards the design closes and the
 questions still open.
@@ -991,31 +991,59 @@ It is not built, and comes after the ZFS backend is proven.
 
 ### 12.1 Packages
 
-One source package, three binary packages, `Architecture: all`:
+**Release 0.1.0 is one binary package**, `tailnet-unlock_<version>_all.deb`, `Architecture: all`. It
+holds everything the box side has: the initramfs-tools hook and scripts (including `scripts/panic`),
+the door command, the ZFS load-key extension, the `tailnet-unlock` command with its Python package,
+the dpkg trigger and the maintainer scripts. It is built by `tools/build-deb <version> <outdir>` with
+`dpkg-deb` from the tree `tools/install-tree` writes, plus `packaging/` (the control file and the
+maintainer scripts) and the documents; there is no debhelper. The build is reproducible: file times
+are the commit's time (`SOURCE_DATE_EPOCH`), owners are root, modes are set explicitly, and two builds
+of one commit are byte-equal (a unit test, a step of the check workflow and the release job each
+compare two builds).
+
+| Field | Value |
+|---|---|
+| Depends | `python3 (>= 3.13)`, `initramfs-tools`, `dropbear-bin`, `tpm2-tools`, `libtss2-tcti-device0t64`, `zfs-initramfs` (Debian `contrib`) |
+| Recommends | `tailscale (>= 1.86)`, from Tailscale's own apt repository: only the tailnet door needs it, so a box that uses the uplink door alone does not |
+| Conflicts | `dropbear-initramfs` (decision D2) |
+| Triggers | `interest-noawait /usr/sbin/tailscaled` |
+
+**Split, when the keyholder arrives.** The package then becomes one source package with three binary
+packages, all `Architecture: all`:
 
 | Package | Contents | Depends |
 |---|---|---|
-| `tailnet-unlock` | initramfs-tools hook and scripts (including `scripts/panic`), the door command, the ZFS load-key extension, the box CLI, the dpkg trigger, the `prerm` guard | `python3-tailnet-unlock`, `initramfs-tools`, `dropbear-bin`, `tpm2-tools`, `tailscale (>= 1.86)` (from Tailscale's own apt repository), `zfs-initramfs` (Debian `contrib`) for the ZFS backend; Conflicts: `dropbear-initramfs` (decision D2) |
+| `tailnet-unlock` | the box side above | `python3-tailnet-unlock`, and the rest of the table above |
 | `tailnet-unlock-keyholder` | `deliver`, `unlock`, `watch`, approvers, examples | `python3-tailnet-unlock`, `openssh-client` |
 | `python3-tailnet-unlock` | the Python package both use | `python3 (>= 3.13)` |
 
 For keyholders that are not Debian (a laptop, a CI image): a single-file zipapp,
 `tailnet-unlock-keyholder.pyz`, attached to each release; the code uses the standard library only.
 
-Distribution: `.deb` files and the zipapp as GitHub release assets with checksums for 0.x; an apt
-repository once there are users who ask.
+**Distribution.** A tag `vX.Y.Z` runs the full test matrix, and then creates a draft GitHub release
+whose assets are the `.deb`, the source archive and `SHA256SUMS`, each with a GitHub build provenance
+attestation (`gh attestation verify`). A person publishes the draft. The release workflow refuses a
+tag that differs from the version in `pyproject.toml`, `src/tailnet_unlock/__init__.py` and the newest
+entry of `CHANGELOG.md`, and a tag whose commit is not on `main`. An apt repository comes once there
+are users who ask.
 
-A dpkg trigger on `/usr/sbin/tailscaled` rebuilds every initramfs when the Tailscale package changes,
-so each image carries the tailscaled the system runs, and `verify` reads each image's version against
-the floor, older kernels' images included. The trigger never fails its package (decision D18): its
-script runs `update-initramfs -u -k all`, reports a failure on stderr with a `W: tailnet-unlock:` line
-and in the record `verify` reads, and exits 0. A Tailscale upgrade that cannot rebuild an image
-leaves that image with the older tailscaled and a warning, never a half-configured package.
+**The trigger and the maintainer scripts.** A dpkg trigger on `/usr/sbin/tailscaled` rebuilds every
+initramfs when the Tailscale package changes, so each image carries the tailscaled the system runs, and
+`verify` reads each image's version against the floor, older kernels' images included. The trigger
+never fails its package (decision D18): the `postinst` runs `update-initramfs -u -k all` for the
+`triggered` action, and for `configure`, only when the box is configured (`/etc/tailnet-unlock/box.toml`
+exists), reports a failure on stderr with a `W: tailnet-unlock:` line, and exits 0. A Tailscale
+upgrade that cannot rebuild an image leaves that image with the older tailscaled and a warning, never
+a half-configured package; `verify` then reports the stale image. A package installed on a box that is
+not configured changes nothing about its boot.
 
-**Removal guard** (decision D29): while the box is enrolled (a sealed door exists and the encryption
-root's `keylocation` is `prompt`), `prerm` refuses `remove` and `purge`, saying to run
-`tailnet-unlock disable` first: removing the hooks would leave the next initramfs without a door.
-Upgrades are not affected.
+**Removal guard** (decision D29): `prerm` refuses `remove` and `purge` while the box is enrolled: the
+door container exists (`/var/lib/tailnet-unlock/door/door.tpm`) and `zfs get keylocation` reports an
+encryption root at `prompt`. It says what to do first (give the pool its key file back, rebuild the
+images, reboot once, then remove): removing the hooks would leave the next initramfs without a door.
+A box without `zfs` is not refused; one where `zfs` fails is, because the guard cannot tell. Upgrades
+(and every other action) are not affected. `postrm` removes the Python bytecode that root's runs leave
+beside the package, and on `purge` deletes `/etc/tailnet-unlock` and `/var/lib/tailnet-unlock`.
 
 ### 12.2 Files
 
@@ -1098,8 +1126,9 @@ uplink = "192.0.2.10"
 
 Box: `enroll`, `commit`, `status`, `verify [--next-boot]`, `reseal [--profile P] [--next-boot-only]`,
 `rotate`, `disable [--tailnet|--local-key|--console]`, `door-keygen` and `seal` (the building
-blocks `enroll` will call), `render-initramfs` (used by the hook), `pins` and `fingerprint`.
-Built today: `door-keygen`, `seal`, `render-initramfs`, `pins` and `fingerprint`. The rest are planned.
+blocks `enroll` calls), `render-initramfs` (used by the hook), `pins` and `fingerprint`.
+Built in 0.1.0: `door-keygen`, `seal`, `render-initramfs`, `pins`, `fingerprint`, `enroll` (the unlock
+node only), `verify`, `status` and `disable --tailnet`. The rest are planned.
 
 Keyholder: `pins add <pins.toml>`, `unlock <host> [--recovery]`, `deliver <host>`, `watch`,
 `planned <host>`, `approver {ssh,tty,deny} ...`, `audit`.
@@ -1205,15 +1234,17 @@ src/tailnet_unlock/
                   keyholder/: pins (the role from the verified key), approval (the contract),
                   keymaterial, doorstatus. Planned: predict, enroll, door_client, deliver,
                   approvers/, watch, audit
-tools/            install-tree (puts the files where the package will), check_ignores.py
+tools/            install-tree (puts the files where the package will), build-deb (the
+                  reproducible .deb), check_ignores.py
 tests/unit/       pytest: the pure functions, the harness's command lines
 tests/shell/      the door, the panic script and the load-key extension under dash and busybox
 tests/tpm/        door-keygen, seal and unseal against swtpm; the supervisor with dropbear
 tests/initramfs/  real images from mkinitramfs, the degraded builds, the door run from an image
 tests/vm/         the harness, one TCG boot, the KVM scenarios and the guest's provisioning
+tests/package/    the .deb installed, upgraded, removed and purged with apt in the test container
 tests/container/  the Debian 13 test image (packages from Debian itself)
 examples/         box.toml; planned: keyholder.toml, policy.hujson, approver scripts
-debian/           packaging (planned)
+packaging/        the .deb's control file, maintainer scripts, triggers and conffiles
 ```
 
 `make test` runs every tier but the KVM one in the test container, with one command; `make lint
@@ -1226,8 +1257,8 @@ unit` is what CI's check job runs.
 | Run | Trigger | What | Where |
 |---|---|---|---|
 | Local | every commit | `make test`: in the Debian 13 test container, `shellcheck --shell=sh`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, the unit and shell tests, swtpm and dropbear, real images, one TCG boot; `make vm-test` for the KVM scenarios | the developer's machine with docker; a Debian host with KVM for the VM scenarios |
-| Check | every push and pull request | **one job**: `shellcheck --shell=sh` on `initramfs/`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, and the unit tests (busybox-sh tests included) on the newest stable Python | GitHub-hosted runner |
-| Weekly | a schedule, once a week | the full matrix: unit tests on Python 3.13 through the newest stable; the container tiers of `make test` on Debian 13 and 14; once packages exist, package build, `lintian`, install and purge on Debian 13 and 14; the VM scenarios on Debian 13 and 14 against headscale; plus the next Python pre-release, allowed to fail | GitHub-hosted runners (Linux runners expose `/dev/kvm`) |
+| Check | every push and pull request | **one job**: `shellcheck --shell=sh` on `initramfs/`, `tools/` and `packaging/`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, the unit tests (busybox-sh tests included) on the newest stable Python, and two builds of the `.deb` that must be byte-equal | GitHub-hosted runner |
+| Weekly | a schedule, once a week | the full matrix: unit tests on Python 3.13 through the newest stable; the container tiers of `make test` on Debian 13 and 14; the package's install, upgrade, removal guard and purge on Debian 13 and 14 (`make deb`, part of `make test`); the VM scenarios on Debian 13 and 14 against headscale; plus the next Python pre-release, allowed to fail | GitHub-hosted runners (Linux runners expose `/dev/kvm`) |
 | Release | a version tag | the full matrix and the VM scenarios on every supported Debian release (13 and 14), all required, plus the VM scenarios against a throwaway Tailscale tailnet (an OAuth client in the repository's secrets, scoped to auth keys for a test tag); then the release assets are built | GitHub-hosted runners |
 | Hardware | before each release, by hand | the scenarios that need real hardware on one machine with a discrete TPM and one with a firmware TPM; results in the release notes | the maintainer's machines |
 
@@ -1307,17 +1338,20 @@ forks. Debian 14 runs use initramfs-tools until the dracut module exists.
 
 ## 16. What is built and planned, and in what order
 
-The work goes in the order of the table. The first four rows make up the first release, for Debian 13
-with ZFS and the `tpm` profile; the last three follow it. "Passes when" names the scenarios of
+The work goes in the order of the table. Release 0.1.0 is the box side, for Debian 13 with ZFS and the
+`tpm` profile: rows 2 and 3 and the 0.1.0 part of row 5 (`enroll`, `verify`, `status`, `disable
+--tailnet`, the trigger, the removal guard and the one `.deb`). Delivery (row 4), the rest of row 5 and
+rows 6 to 8 follow it; until delivery exists, a person or a script unlocks through the door with plain
+`ssh` (`status`, then `unlock <boot_id>` with the key on stdin). "Passes when" names the scenarios of
 section 15.3 that must pass for the row to count as done.
 
 | Order | Feature | State | Passes when |
 |---|---|---|---|
 | 1 | The design | Written (this document). | n/a |
-| 2 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, a person unlocking by hand (the keyholder `unlock` command is planned; plain `ssh` to the door works today); the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | Built and tested in the Debian 13 test container. The KVM scenarios are written and have not been run (below). | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 |
-| 3 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | Not built. The supervisor already starts and restarts `tailscaled` when a sealed node state exists, but nothing creates that state and no test joins a tailnet. | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) |
+| 2 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, a person unlocking by hand (the keyholder `unlock` command is planned; plain `ssh` to the door works today); the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | Built and tested in the Debian 13 test container, and the KVM scenarios pass in CI (since 2026-11-22). | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 |
+| 3 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | Built for 0.1.0: `enroll`, `verify`, `status`, `disable --tailnet`, and `tailscaled` in the initramfs with the same flags as `enroll`. Not built: the policy example and the headscale scenarios of the harness. | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) |
 | 4 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, the role from the verified key, audit, `watch`, `on_alarm` | Not built, apart from the pure code for pins, the approval contract, the door's status line and the key material, with unit tests. | T2, T3, T12, T13, T14, T24, T25 |
-| 5 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; then release 0.1 after the release run and the hardware smoke test | Not built, except the degraded build (the hook). | T1 to T22 and T24 to T28 (`tpm`), on headscale and on a Tailscale tailnet |
+| 5 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; then the release run and the hardware smoke test | Built for 0.1.0: `enroll` (the unlock node), `verify`, `status`, `disable --tailnet`, the trigger, the degraded build (the hook), the removal guard and the one `.deb`. Not built: rehearsal, `commit`, `rotate`, `reseal`, `enroll --rekey`, `enroll --import-dropbear-initramfs`, `disable --local-key` and `--console`, the keyholder package and the zipapp. | For 0.1.0: T11, T15, T17 (the removal guard), T18. Then T1 to T22 and T24 to T28 (`tpm`), on headscale and on a Tailscale tailnet |
 | 6 | The dracut module, for Debian 14 | Not built. | T23 (dracut) |
 | 7 | The `measured` profile (systemd-boot and UKI) | Not built. | T8, T9, T10, with Secure Boot on and off |
 | 8 | The LUKS backend | Not built. | T23 (LUKS) |
@@ -1334,11 +1368,11 @@ and `seal` (`generate` and `import`, the recovery key's import), the container, 
 and its grammar under dash and busybox, the supervisor with its restarts, the panic script on both
 branches, the load-key extension with the console prompt and the rehearsal limit, the hook with every
 degradation, the boot scripts, and one real boot under TCG (section 15.2). The process-level and TCG
-tests cover the door halves of T1, T5, T7, T21, T22, T26, T27 and T28. What remains is the KVM run
-of `tests/vm/test_scenarios.py` (T1, T3, T5, T6, T7, T14, T21, T22, T27, T28 against a ZFS root),
-which needs a host with `/dev/kvm`, QEMU, OVMF (`OVMF_CODE_4M.fd`, `OVMF_VARS_4M.fd`), swtpm, about
-20 GB of disk for the cached images, and access to cloud.debian.org and deb.debian.org for the first
-build; and T16's local-key half, which needs `enroll`.
+tests cover the door halves of T1, T5, T7, T21, T22, T26, T27 and T28. The KVM scenarios of
+`tests/vm/test_scenarios.py` (T1, T3, T5, T6, T7, T14, T21, T22, T27, T28 against a ZFS root) pass in
+CI since 2026-11-22; running them locally needs a host with `/dev/kvm`, QEMU, OVMF (`OVMF_CODE_4M.fd`,
+`OVMF_VARS_4M.fd`), swtpm, about 20 GB of disk for the cached images, and access to cloud.debian.org
+and deb.debian.org for the first build. T16's local-key half needs the rehearsal, which is not built.
 
 ## 17. Versions, read 2026-11-21
 

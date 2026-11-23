@@ -7,8 +7,8 @@ disk with provision.sh, and the target's first boot (firstboot.sh) seals an impo
 to the target's own swtpm and moves the root to keylocation=prompt. The result is cached by the
 hash of its inputs. Each scenario then boots an overlay of that disk with a copy of that TPM.
 
-Every key here is a made-up test value generated for the run. Written for KVM hosts and not yet
-run on one; tests/vm/test_tcg_smoke.py is the tier that runs without KVM.
+Every key here is a made-up test value generated for the run. Written for KVM hosts; they pass in CI
+(the full workflow's vm job). tests/vm/test_tcg_smoke.py is the tier that runs without KVM.
 """
 
 import hashlib

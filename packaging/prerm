@@ -1,0 +1,39 @@
+#!/bin/sh
+# Refuse to remove the package while the box unlocks through its door: without the hook the next
+# initramfs has no door, and a box with a root key that lives nowhere on it would wait at a console
+# nobody may be able to reach. "Enrolled" means a sealed door exists and an encryption root asks for
+# its key at the prompt. Upgrades, and every other action, are never refused.
+set -e
+
+DOOR=/var/lib/tailnet-unlock/door/door.tpm
+
+refuse() {
+	cat >&2 <<MSG
+tailnet-unlock: refusing to remove: $1
+The next initramfs would have no door, and the encrypted root would wait for a console. Give the
+pool a key file again (zfs set keylocation=file://... on the encryption root), rebuild the images
+with 'update-initramfs -u -k all', reboot once to prove it, and remove the package after that. The
+README's "Leaving" section has the steps.
+MSG
+	exit 1
+}
+
+case "$1" in
+remove | purge)
+	[ -e "$DOOR" ] || exit 0
+	command -v zfs >/dev/null 2>&1 || exit 0
+	if ! locations=$(zfs get -H -o value -t filesystem,volume keylocation 2>/dev/null); then
+		refuse "a door is installed and zfs cannot tell whether a root asks for its key at the prompt"
+	fi
+	case "
+$locations
+" in
+	*"
+prompt
+"*) refuse "a door is installed and an encryption root has keylocation=prompt" ;;
+	*) ;;
+	esac
+	;;
+*) ;;
+esac
+exit 0

@@ -1,6 +1,8 @@
 # One job on every push and pull request: shellcheck, mypy, ruff, the ignore check and the unit
 # tests (the busybox and dash tests included) on the newest stable Python, 3.15.2 (python.org,
-# read 2026-11-21). It runs on GitHub-hosted runners.
+# read 2026-11-21), then builds the Debian package twice and requires the two to be byte-equal.
+# The container tier installs that package (make deb, in the full workflow). It runs on
+# GitHub-hosted runners.
 name: check
 on:
   push:
@@ -37,3 +39,10 @@ jobs:
       - name: mypy, ruff and pytest
         run: uv pip install --python "$RUNNER_TEMP/venv/bin/python" mypy==2.4.1 ruff==0.17.6 pytest==9.2.0
       - run: make check PYTHON=python
+      - name: The Debian package builds, and builds the same twice
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          tools/build-deb "$version" "$RUNNER_TEMP/deb1"
+          tools/build-deb "$version" "$RUNNER_TEMP/deb2"
+          cmp "$RUNNER_TEMP/deb1/tailnet-unlock_${version}_all.deb" "$RUNNER_TEMP/deb2/tailnet-unlock_${version}_all.deb"
+          dpkg-deb -I "$RUNNER_TEMP/deb1/tailnet-unlock_${version}_all.deb"

@@ -1,7 +1,8 @@
 # The full matrix: weekly, and as the gate of every release (release.yml calls it).
 # Unit tests on every supported Python (3.13, Debian 13's, to 3.15.2, the newest stable) plus the
 # next pre-release (3.16.0a2 today) allowed to fail; the container tiers (swtpm, dropbear, real
-# images, one TCG boot) on Debian 13 and 14; the VM scenarios on a runner with KVM.
+# images, the .deb installed, upgraded, removed and purged, one TCG boot) on Debian 13 and 14;
+# the VM scenarios on a runner with KVM.
 name: full
 on:
   schedule:

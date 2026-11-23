@@ -1,0 +1,21 @@
+Package: tailnet-unlock
+Version: @VERSION@
+Architecture: all
+Section: admin
+Priority: optional
+Installed-Size: @SIZE@
+Maintainer: tailnet-unlock contributors <noreply@github.com>
+Homepage: https://github.com/foreverworks/tailnet-unlock
+Depends: python3 (>= 3.13), initramfs-tools, dropbear-bin, tpm2-tools, libtss2-tcti-device0t64, zfs-initramfs
+Recommends: tailscale (>= 1.86)
+Conflicts: dropbear-initramfs
+Description: unlock an encrypted ZFS root from anywhere on a tailnet
+ Puts a small, locked-down SSH door into the initramfs, answering on the
+ machine's own address and, with Tailscale, on a tailnet of its own. The door's
+ identity is sealed to the machine's TPM, so a copied disk cannot pretend to be
+ the box. The root key stays off the machine.
+ .
+ This package holds the initramfs-tools hook and boot scripts, the door, the
+ ZFS key-loading extension and the tailnet-unlock command. It replaces
+ dropbear-initramfs, and a dpkg trigger rebuilds the initramfs images whenever
+ the tailscaled they carry changes.

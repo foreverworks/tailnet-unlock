@@ -2,6 +2,7 @@
 # Inside the test container (or any Debian 13 host with the same packages) the tiers run alone:
 #   make lint unit          what CI's check job runs, on any machine with dash and busybox
 #   make tpm initramfs      swtpm, dropbear and mkinitramfs; the test container only
+#   make deb                build the .deb and install, upgrade, remove and purge it; the test container only
 #   make tcg                one real boot of the image under QEMU TCG with swtpm (about 1 minute)
 #   make vm-test            the VM scenarios on a host with KVM, QEMU, OVMF and swtpm
 
@@ -12,10 +13,11 @@ DOCKER ?= docker
 RUN = $(DOCKER) run --rm -e TU_TEST_CONTAINER=1 -v "$(CURDIR)":/src -w /src
 SHELL_SCRIPTS = initramfs/door initramfs/supervise initramfs/unseal initramfs/lib.sh \
 	initramfs/paths.sh initramfs/init-premount initramfs/init-bottom initramfs/panic \
-	initramfs/zfs-load-key initramfs/hook initramfs/post-update tools/install-tree
+	initramfs/zfs-load-key initramfs/hook initramfs/post-update tools/install-tree \
+	tools/build-deb packaging/postinst packaging/prerm packaging/postrm
 PYTEST = $(PYTHON) -m pytest -p no:cacheprovider
 
-.PHONY: test lint unit tpm initramfs tcg vm-test image check
+.PHONY: test lint unit tpm initramfs deb tcg vm-test image check
 
 check: lint unit
 
@@ -35,6 +37,9 @@ tpm:
 initramfs:
 	TU_TEST_CONTAINER=1 $(PYTEST) tests/initramfs
 
+deb:
+	TU_TEST_CONTAINER=1 $(PYTEST) tests/package
+
 tcg:
 	TU_TEST_CONTAINER=1 TU_TCG=1 $(PYTEST) tests/vm/test_tcg_smoke.py
 
@@ -46,4 +51,5 @@ image:
 
 test: image
 	$(RUN) $(IMAGE) make lint unit tpm
+	$(RUN) $(IMAGE) make deb
 	$(RUN) --privileged $(IMAGE) make initramfs tcg

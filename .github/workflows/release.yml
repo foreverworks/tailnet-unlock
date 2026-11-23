@@ -1,5 +1,7 @@
-# A version tag: the full matrix and the VM scenarios gate a draft release with the source archive
-# and its checksum. The .deb packages and the keyholder zipapp join the assets once they are built.
+# A version tag: the full matrix and the VM scenarios gate a draft release. Its assets are the
+# Debian package, the source archive and their checksums, with a build provenance attestation for
+# each. The keyholder package and zipapp join the assets once they are built. The release stays a
+# draft until a person publishes it.
 name: release
 on:
   push:
@@ -24,24 +26,72 @@ jobs:
             exit 1
           fi
 
-  full:
-    needs: on-main
-    uses: ./.github/workflows/full.yml
-
-  release:
-    needs: full
+  version:
+    # the tag, the package version, the module's version and the changelog's newest entry agree
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - run: |
-          name="tailnet-unlock-${GITHUB_REF_NAME#v}"
-          git archive --format=tar.gz --prefix="$name/" -o "$name.tar.gz" "$GITHUB_SHA"
-          sha256sum "$name.tar.gz" >SHA256SUMS
+          python3 - "$GITHUB_REF_NAME" <<'PY'
+          import re
+          import sys
+          import tomllib
+
+          tag = sys.argv[1]
+          with open("pyproject.toml", "rb") as f:
+              project = tomllib.load(f)["project"]["version"]
+          init = re.search(r'__version__ = "([^"]+)"', open("src/tailnet_unlock/__init__.py").read())
+          top = re.search(r"^## (\S+)", open("CHANGELOG.md").read(), re.MULTILINE)
+          found = {
+              "tag": tag.removeprefix("v"),
+              "pyproject.toml": project,
+              "__init__.py": init.group(1) if init else None,
+              "CHANGELOG.md": top.group(1) if top else None,
+          }
+          print(found)
+          if len(set(found.values())) != 1:
+              print(f"::error::the version differs between {', '.join(found)}")
+              sys.exit(1)
+          PY
+
+  full:
+    needs: on-main
+    uses: ./.github/workflows/full.yml
+
+  release:
+    needs: [version, full]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Source archive and Debian package
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          mkdir assets
+          git archive --format=tar.gz --prefix="tailnet-unlock-$version/" \
+            -o "assets/tailnet-unlock-$version.tar.gz" "$GITHUB_SHA"
+          tools/build-deb "$version" assets
+          # the same commit must give the same package
+          tools/build-deb "$version" again
+          cmp "assets/tailnet-unlock_${version}_all.deb" "again/tailnet-unlock_${version}_all.deb"
+          (cd assets && sha256sum "tailnet-unlock-$version.tar.gz" "tailnet-unlock_${version}_all.deb" >SHA256SUMS)
+          cat assets/SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
+        with:
+          subject-path: assets/*
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" --draft --verify-tag tailnet-unlock-*.tar.gz SHA256SUMS
+        run: |
+          # the release notes are the newest entry of the changelog
+          awk '/^## /{n++} n==1' CHANGELOG.md >notes.md
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md assets/*

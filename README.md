@@ -9,12 +9,16 @@ for its key after a reboot. The door's identity is sealed to the machine's TPM, 
 cannot pretend to be your box. The key comes from you, or from a machine you trust after an approval
 you control.
 
-> **Status: unfinished, and not for a machine you cannot reach.** There is no release and no
-> package. The repository holds the design ([DESIGN.md](DESIGN.md)) and the first parts of it, with
-> their tests: sealing the door's key to the TPM, the door itself, the initramfs hook and the boot
-> scripts. The pieces that make it usable are not written yet: `enroll`, the safe test reboot
-> (rehearsal), `deliver`, `unlock`, `watch`, `verify`, and the Debian packages. Without them you
-> cannot set up a real box end to end. Most of this page describes what is planned, and says so.
+> **Status: version 0.1.0, the box side only. Early software, not for a machine you cannot reach.**
+> This release sets up and checks the door on one Debian 13 machine with root on ZFS and a TPM:
+> the door on the machine's own address (the uplink), the door on your tailnet, `enroll`, `verify`,
+> `status`, `disable --tailnet`, and one `.deb` package. You unlock a box through the door with plain
+> `ssh`: `status` tells you the boot it is waiting in, and `unlock <boot id>` takes the key on stdin.
+> What it does not have yet: the keyholder program that delivers a key for you after an approval
+> (`deliver`, `watch`, approvers), the safe test reboot (`rehearsal` and `commit`), `rotate`, `reseal`,
+> dracut for Debian 14, the `measured` profile and LUKS. Those are described in the design and are
+> planned, not built. It has not yet been run on real hardware, and it has had no independent
+> security audit.
 > What is built and what is not is listed in the [table in section 16 of DESIGN.md](DESIGN.md#16-what-is-built-and-planned-and-in-what-order).
 
 **The risk, plainly.** This software runs in early boot, before your system is up, and sits between
@@ -59,8 +63,9 @@ does not exist.
 **Who it is not for.** If the machine has no TPM 2.0, or a virtual one that travels with snapshots,
 it cannot work. If you want the box to boot by itself with no one deciding, use TPM auto-unlock
 (Clevis, `systemd-cryptenroll`) and accept what it gives up (see "How it compares"). If the box has a
-public address and you only need to type a passphrase over SSH, `dropbear-initramfs` is simpler. Today
-it is also not for anyone who needs something that installs and works: see the status above.
+public address and you only need to type a passphrase over SSH, `dropbear-initramfs` is simpler. It is
+also not yet for anyone who wants the key delivered automatically: version 0.1.0 leaves that
+step to you and `ssh`.
 
 ## The usual answers, and what they give up
 
@@ -74,27 +79,107 @@ it is also not for anyone who needs something that installs and works: see the s
 
 ## What you need
 
-To run what exists today (the checks and a rendering of the boot configuration), on a Linux machine:
+To install on a machine, all of this, on Debian 13 ("trixie"):
 
-- Python 3.13 or later. The tool uses the standard library only.
-- To run the checks: `shellcheck`, plus `dash` or `busybox` (the shell tests run under whichever is
-  installed, and CI uses both), from your package manager (`apt install shellcheck dash busybox` on
-  Debian); and `mypy`, `ruff` and `pytest`, which the next section installs into a virtual
-  environment at the versions in [`.github/workflows/check.yml`](.github/workflows/check.yml).
-- To run the full local test suite (`make test`): Docker. It builds a Debian 13 test image and runs
-  swtpm (a software TPM), dropbear and a real `mkinitramfs` in it. Nothing touches the TPM, the disks
-  or the boot of the machine you run it on.
+- Root on **ZFS with native encryption**, and the `contrib` component enabled in apt (ZFS's initramfs
+  support lives there). initramfs-tools is the initramfs generator, as on a default Debian.
+- A **TPM 2.0** (`/dev/tpmrm0` exists) with its owner hierarchy left at the default empty password.
+- A wired uplink with IPv4.
+- For the tailnet door: **Tailscale 1.86 or later**, from [Tailscale's own apt
+  repository](https://tailscale.com/kb/1031/install-linux), and an account on a tailnet you control.
+  Without it the box still gets the door on its own address.
+- A **console** you can reach if something goes wrong: a provider's KVM or serial console, a rescue
+  system, or a person on site.
+- Room on `/boot`: each initramfs grows by about 22 MB (compressed) for `tailscaled`.
 
-To go further, on a machine you can afford to lose access to: Debian 13 with initramfs-tools, root on
-ZFS with native encryption, a TPM 2.0, a console, and the other requirements below. All of it is free
-software, and nothing here costs money beyond the machine.
+The package depends on `python3` (3.13 or later, the Debian 13 one), `initramfs-tools`,
+`dropbear-bin`, `tpm2-tools`, `libtss2-tcti-device0t64` and `zfs-initramfs`, and conflicts with
+`dropbear-initramfs`, because two SSH servers cannot share early boot. Everything is free software.
 
-## Try it
+To work on the code or run the checks you also need Python 3.13 or later, `shellcheck`, `dash` or
+`busybox`, and for `make test` Docker; see "Run the checks" below.
 
-There is nothing to install from a release. Work from a checkout of the repository.
+## Install
 
-**1. Run the checks** (about two minutes). Install `shellcheck` and `dash` (or `busybox`) with your
-package manager first, then:
+Releases are on the [releases page](https://github.com/foreverworks/tailnet-unlock/releases). Each has
+the package, the source archive and a `SHA256SUMS` file. Download the `.deb` and `SHA256SUMS` into one
+directory, check the package against the sums, and install it with apt, which also pulls in what it
+depends on:
+
+```
+sha256sum --check --ignore-missing SHA256SUMS
+sudo apt install ./tailnet-unlock_0.1.0_all.deb
+```
+
+The checksum only tells you that the file is the one the release lists. Where you have the GitHub CLI,
+you can also check that GitHub built it from this repository's tagged source:
+
+```
+gh attestation verify tailnet-unlock_0.1.0_all.deb --repo foreverworks/tailnet-unlock
+```
+
+Installing changes nothing about how the box boots until you configure it. On a box that already has
+`/etc/tailnet-unlock/box.toml`, installing or upgrading rebuilds the initramfs images, and so does
+every upgrade of Tailscale (a dpkg trigger on `tailscaled`, so each image carries the `tailscaled` the
+system runs). A rebuild that fails prints a `W: tailnet-unlock:` line and never fails the package.
+
+**Removing it is refused while the box depends on it.** If a door key exists and an encryption root's
+key is asked for at the prompt (`keylocation=prompt`), `apt remove` and `apt purge` stop with a
+message, because the next initramfs would have no door. Upgrades are never refused. "Leaving" below
+says how to get out. `apt purge` removes `/etc/tailnet-unlock` and `/var/lib/tailnet-unlock`, which
+holds the door's sealed key and the node's state: do it only for a box you are done with.
+
+## Set up a box
+
+Do this on a machine you can afford to lose access to, with its console at hand. Each step leaves a
+box that still boots the way it did.
+
+1. **Configure.** Copy [`examples/box.toml`](examples/box.toml) to `/etc/tailnet-unlock/box.toml` and
+   set the uplink (`network.match` or the address), the door's `port` and whether the tailnet door is
+   on. Put the public keys that may unlock in `/etc/tailnet-unlock/delivery_keys` (a keyholder
+   machine or script) and `/etc/tailnet-unlock/operator_keys` (people), one per line. The comments in
+   the example, and section 12.3 of the design, say what each key does.
+2. **Make the door's keys.** Turn swap off first (`swapoff -a`: the key exists in plain form in memory
+   for a moment). Then `sudo tailnet-unlock door-keygen`, and `sudo tailnet-unlock door-keygen
+   --recovery` if you enabled the recovery door. `tailnet-unlock pins` prints the fingerprints to
+   write down and give to whoever will unlock.
+3. **Join the tailnet** (skip this if `tailnet.enabled = false`). In the Tailscale admin console,
+   make a one-use, pre-approved, non-ephemeral auth key tagged `tag:unlock`, and save it to a file
+   that only root can read. Write a policy where nothing but your keyholders and operators can reach
+   the door's port, and the door reaches nothing (section 7.5 of the design has an example). Then
+   `sudo tailnet-unlock enroll --auth-key-file <file>`. It starts a second `tailscaled` of its own,
+   joins as `<host>-unlock`, checks that the node's state is sealed by the TPM and that it opens again,
+   deletes the key file, rebuilds every initramfs and checks each one.
+4. **Check.** `sudo tailnet-unlock verify` reads every image in `/boot` and lists what is wrong, if
+   anything, and exits with 1 when it finds a problem. `tailnet-unlock status` shows what the last
+   boot did and what is enrolled.
+
+At this point the box has a door in its images, but if its root still has a key file, the root unlocks
+by itself as before and nobody asks the door anything. **To actually use the door** you move the root
+to a prompt: `zfs set keylocation=prompt <encryption root>`, then `update-initramfs -u -k all` and
+`tailnet-unlock verify`. Version 0.1.0 does not do this for you, and does not have the rehearsal that
+falls back to the old key if the door fails. So: keep the key file, and a copy of the key somewhere
+safe, until you have rebooted once and unlocked through the door yourself. If that goes wrong, the
+console prompt takes the same key.
+
+### Unlocking through the door
+
+The box waits in the initramfs, with the door on its own address and on the tailnet, on the port in
+`box.toml`. With any key from `delivery_keys` or `operator_keys`:
+
+```
+ssh -p <port> root@<address> status                  # shows "boot_id", which key it presents, what it waits for
+ssh -p <port> root@<address> unlock <boot_id> < keyfile
+```
+
+Check the fingerprint your SSH client shows against the one `tailnet-unlock pins` printed before you
+send a key. The door replies with one line of JSON: `loaded`, `wrong-key` (try again), `not-waiting`
+or `boot-mismatch`. Send the key only to the sealed door, or to the recovery door when you know why
+the box is in recovery (below).
+
+## Run the checks
+
+Install `shellcheck` and `dash` (or `busybox`) with your package manager, then, from a checkout:
 
 ```
 git clone https://github.com/foreverworks/tailnet-unlock
@@ -104,13 +189,15 @@ python3 -m venv .venv
 PATH=$PWD/.venv/bin:$PATH make check
 ```
 
-The last line should look like `212 passed in 98s`; the count grows as tests are added. `make check` runs
-`shellcheck`, `mypy`, `ruff` and the unit and shell tests. With Docker, `make test` also runs the TPM
-tests, the image tests and one real boot under QEMU.
+`make check` runs `shellcheck`, `mypy`, `ruff` and the unit and shell tests, and ends with a line
+like `... passed in ...s` and no failures. With Docker, `make test` builds a Debian 13 test image and
+also runs the TPM tests against swtpm (a software TPM), real `mkinitramfs` images, the package's
+install, upgrade, removal and purge with apt, and one real boot under QEMU. Nothing touches the TPM,
+the disks or the boot of the machine you run it on. The virtual-machine scenarios that boot a ZFS root
+(`make vm-test`) need a host with KVM; CI runs them weekly and before every release.
 
-**2. Render the boot configuration** the way the initramfs hook does, from the example in
-[`examples/box.toml`](examples/box.toml). This writes two files to a scratch directory, and does not
-touch the TPM or the machine's boot:
+You can also render the boot configuration the way the initramfs hook does, from
+[`examples/box.toml`](examples/box.toml), without installing anything:
 
 ```
 mkdir -p scratch/etc
@@ -122,59 +209,54 @@ PYTHONPATH=src python3 -m tailnet_unlock render-initramfs \
 cat scratch/out/tailnet-unlock.conf
 ```
 
-Expect `TU_BACKEND=zfs`, `TU_PORT=2222`, `TU_UNLOCK_HOSTNAME=box-unlock` and the other values the boot
-scripts read. `scratch/out/authorized_keys` holds your key with the options that limit it to the door's
-one command. A mistake in `box.toml` stops the command with a message that says what is wrong.
-
-**3. See where the files would go**, without installing anything:
-
-```
-sh tools/install-tree scratch/root
-```
-
-This copies the hook, the boot scripts, the ZFS key-loading extension and the Python package to the
-paths the Debian package will use, under `scratch/root`. Run it with no argument and it installs into
-`/`, which belongs in a test virtual machine and nowhere else.
-
-The commands that touch the TPM are `door-keygen` and `seal`. They need a real or software TPM at
-`/dev/tpmrm0`, and the tests run them against swtpm. Run them yourself only on a machine you are
-prepared to lose access to.
+`scratch/out/authorized_keys` holds your key with the options that limit it to the door's one command.
+A mistake in `box.toml` stops the command with a message that says what is wrong.
 
 ## If something goes wrong
 
-These are the ways back in, in the order to try them. Several belong to parts that are planned, so
-read each as what the design promises, not as something to rely on today.
+These are the ways back in, in the order to try them.
 
 - **The console is the last way in and always works.** Keep a console you can reach before you change
   anything about early boot: a provider's KVM or serial console, a rescue system, a person on site.
   The boot scripts are written so that when the door cannot start, the console prompt for the root
-  key remains.
-  On a box behind NAT whose TPM fails, the console is the only way.
-- **Never remove your old way of unlocking until a door unlock has worked.** The design keeps the
-  box's old local key file until a reboot has been unlocked through the door. The safe test reboot
-  (rehearsal, then `commit`) that enforces this is not built yet. Until it is, do not delete a local
-  key by hand on the strength of this software.
+  key remains. On a box behind NAT whose TPM fails, the console is the only way.
+- **Never remove your old way of unlocking until a door unlock has worked.** Version 0.1.0 has no
+  rehearsal reboot and no `commit` to enforce this: it is yours to do. Keep the root's key file, and
+  a copy of the key elsewhere, until you have rebooted once and unlocked through the door yourself.
 - **Back out of the initramfs hook.** The hook only adds files to the initramfs. If a box fails to
-  boot with it, boot a rescue system, unlock the root pool, chroot into it, remove the files that
-  `tools/install-tree` lists (`/usr/share/initramfs-tools/hooks/tailnet-unlock`, the scripts under
-  `/usr/share/initramfs-tools/scripts/` named `tailnet-unlock`,
+  boot with it, boot a rescue system, unlock the root pool, chroot into it, remove the files the
+  package installed (`dpkg -L tailnet-unlock` lists them; `apt` will refuse to remove the package
+  while the box is enrolled, so remove the hook files by hand: `/usr/share/initramfs-tools/hooks/tailnet-unlock`,
+  the scripts named `tailnet-unlock` under `/usr/share/initramfs-tools/scripts/`,
   `/usr/share/initramfs-tools/conf.d/tailnet-unlock`,
   `/etc/zfs/initramfs-tools-load-key.d/tailnet-unlock`,
   `/etc/initramfs/post-update.d/tailnet-unlock` and `/usr/lib/tailnet-unlock`), and run
   `update-initramfs -u -k all` to rebuild without it.
 - **The hook never fails a kernel update.** If a part is missing or `/boot` is too small, the build
   prints a `W: tailnet-unlock:` warning and carries on with less (the tailnet door, then the sealed
-  door, then any door), and the box still boots through the console prompt.
-- **If the TPM is cleared or replaced,** the sealed door key cannot be opened. The recovery door (below)
-  can answer on the box's own address if you enabled it. Otherwise use the console. No data is lost:
-  the disk key was never in the TPM.
+  door, then any door), and the box still boots through the console prompt. `tailnet-unlock verify`
+  reports every image that is not what it should be.
+- **If the TPM is cleared or replaced,** the sealed door key cannot be opened. The recovery door
+  (below) can answer on the box's own address if you enabled it. Otherwise use the console. No data
+  is lost: the disk key was never in the TPM. After you have unlocked once, `tailnet-unlock door-keygen
+  --replace` makes a new door key and `tailnet-unlock enroll --replace` a new unlock node.
+
+### Leaving
+
+1. Put the root's key back the way it was: a key file, and `zfs set keylocation=<where it is>` on the
+   encryption root. Reboot once and make sure the box unlocks.
+2. `sudo tailnet-unlock disable --tailnet` logs the unlock node out, deletes its state and rebuilds
+   the images without `tailscaled`. It prints the node's id: delete that node in your Tailscale admin
+   console (or with its API) too, because the tool cannot.
+3. `sudo apt remove tailnet-unlock`. The removal guard lets it through once no root asks for its key
+   at the prompt. `apt purge` also deletes the door's keys and the box's configuration.
 
 ## What tailnet-unlock is designed to do
 
 1. **Early boot opens a door.** The initramfs brings up the network, starts a minimal SSH server and a
    Tailscale node of its own, `<host>-unlock`. The door answers on your tailnet and on the box's own
-   address. Behind NAT, the tailnet is how you reach it. The SSH server and the network are built;
-   the tailnet node's identity is not, because `enroll` is not written.
+   address. Behind NAT, the tailnet is how you reach it. Built: the
+   SSH server, the network, and `enroll`, which gives the node its identity.
 2. **The door can only do one thing.** Every login runs one command: report its status, or accept a
    key. No shell, no forwarding, keys only. Built.
 3. **The door's identity is sealed to the TPM.** Its SSH host key and its tailnet node keys are
@@ -184,7 +266,7 @@ read each as what the design promises, not as something to rely on today.
    home. You can type it in, or let the keyholder deliver it after an **approver** says yes. You decide
    what an approval is: a touch of your security key over SSH, a button in your own system, anything
    that can run a program. The rules for an approval are written and tested as code; the commands
-   that use them are not built.
+   that use them are not built, so in 0.1.0 you type or pipe the key through `ssh` yourself.
 5. **The door closes before the system starts.** The tailnet node goes offline, the door's keys are
    deleted from early boot's temporary storage, and your system's own Tailscale node comes up as
    usual. Built.
@@ -198,8 +280,8 @@ present your box's SSH host key. The next time something sends the key, it may s
 With the identity sealed, the copy holds only ciphertext that your machine's TPM alone can open, so it
 can neither join the tailnet nor present the sealed host key your keyholder expects. The keyholder is
 designed to send the key only to a door that presents that sealed key, with one exception that stays
-yours to make: the recovery door below, which you unlock by hand (`unlock --recovery`), or
-automatically only if you turn that on and your approver confirms it.
+yours to make: the recovery door below, which you unlock by hand over SSH (the keyholder's
+`unlock --recovery` is planned), or automatically only if you turn that on and your approver confirms it.
 
 Because the TPM holds only the door, never the disk key, losing the TPM loses the door and nothing
 else. Your data is still yours: you unlock once, at the console or through the recovery door where you
@@ -226,28 +308,32 @@ host key, so you can still unlock it over the network.
   default in the default profile, and is planned to be off by default in the `measured` profile
   (below).
 
-## What the first release is planned to include
+## What 0.1.0 includes, and what comes later
 
 Each item says whether it exists in the repository today.
 
 - initramfs-tools integration for Debian 13: built. A dracut module for Debian 14: not built.
 - The ZFS backend: built. LUKS, with the same door: not built.
-- A `tailnet-unlock` command on the box: `door-keygen`, `seal`, `render-initramfs`, `pins` and
-  `fingerprint` are built. `enroll`, the **rehearsal** reboot that falls back to your old key if
-  anything goes wrong, `commit`, `rotate`, `disable` and `verify` are not.
+- On the box: `door-keygen`, `seal`, `render-initramfs`, `pins`, `fingerprint`, and the lifecycle
+  commands `enroll`, `verify`, `status` and `disable --tailnet`: built. The **rehearsal** reboot that
+  falls back to your old key if anything goes wrong, `commit`, `rotate`, `reseal`, `enroll --rekey`
+  and `disable --local-key`: not built.
+- The Debian package, with the trigger that rebuilds images when Tailscale changes and the guard that
+  refuses removal while the box depends on it: built, one `.deb` on each release.
 - A keyholder: `unlock` for you at a terminal, `deliver` for automation, `watch` to notice a box
-  waiting at its door after a reboot nobody planned. Not built; the door's side of delivery is.
+  waiting at its door after a reboot nobody planned. Not built; the door's side of delivery is, and
+  plain `ssh` does the same job by hand.
 - A small, documented approver contract (JSON in, JSON out): the contract is built as code and
   tests. The complete approver that needs nothing but SSH is not built.
 - An example tailnet policy, with tests, where the door can reach nothing and only your keyholders and
-  operators can reach the door. Not written.
+  operators can reach the door. Not written; section 7.5 of the design has the shape.
 - Fallbacks: the box's own address when the tailnet is down, the recovery door after a TPM clear
   where you enabled it and can reach it, and the console. For a box behind NAT whose TPM failed, the
   console is the only way back. The uplink door, the recovery door and the console prompt are built.
-- Debian packages, and a single-file keyholder for machines that are not Debian. Not built.
+- A single-file keyholder for machines that are not Debian. Not built.
 
-Nothing in this list has yet run on real hardware, and the virtual machine scenarios that boot a real
-ZFS root are written and have not been run.
+The container tests and a real boot under QEMU TCG run on every release. The virtual-machine scenarios
+that boot a real ZFS root pass in CI (since 2026-11-22). Nothing has yet run on real hardware.
 
 ## The security model in plain words
 
@@ -281,18 +367,11 @@ not control, or someone who can cut the network (the console still works).
 None of this has had an independent security audit. The problems found while building it, and how
 they were fixed, are recorded in section 19 of [DESIGN.md](DESIGN.md).
 
-## Requirements (planned)
+## Requirements
 
-- Debian 13 with initramfs-tools, and the `contrib` archive component enabled (ZFS lives there).
-- Root on ZFS with native encryption. LUKS comes later.
-- A TPM 2.0 (`/dev/tpmrm0` exists), with its owner hierarchy left at the default empty authorization.
-  No TPM, no tailnet-unlock.
-- Tailscale 1.86 or later on the box, or a headscale server.
-- A wired uplink with IPv4.
-- Room on `/boot`: each initramfs grows by about 22 MB (compressed) for `tailscaled`. The build checks
-  before it writes, and leaves the tailnet door out of an image that would not fit.
-- A keyholder: any machine with Python 3.13 or later and an SSH client, and a place to keep the key
-  (a password manager, SOPS, a file on an encrypted disk: anything that prints it on request).
+See "What you need" above. A keyholder, once it is built, needs only Python 3.13 or later and an SSH
+client, and a place to keep the key (a password manager, SOPS, a file on an encrypted disk: anything
+that prints it on request). Today that is you with `ssh`.
 
 ## Back up the root key
 
@@ -314,7 +393,7 @@ before you reboot and keep the old kernel working too.
 
 **What if the TPM dies, or I clear it?** The door cannot open its sealed identity, so the box offers
 the recovery door on its own address, if enabled, and the console. Unlock once, run
-`tailnet-unlock enroll --replace` (planned), and you have a new door. No data is lost: the TPM never
+`tailnet-unlock door-keygen --replace` and `tailnet-unlock enroll --replace`, and you have a new door. No data is lost: the TPM never
 held the disk key.
 
 **My box is behind NAT. Will this work?** It is designed to, through the tailnet door. The recovery
@@ -332,25 +411,27 @@ yourself, against a small contract, and you own the risk.
 scenarios against headscale every week and before every release, once those scenarios exist.
 
 **I use dropbear-initramfs today.** tailnet-unlock replaces it (two SSH servers cannot share early
-boot). `enroll` is planned to carry over your authorized keys. Your old host keys are not reused,
-because they sat in plain text on `/boot`.
+boot), and the package conflicts with `dropbear-initramfs`, so apt removes it when you install this
+one. Copy your authorized keys into `delivery_keys` or `operator_keys` yourself; carrying them over
+with `enroll --import-dropbear-initramfs` is planned. Your old host keys are not reused, because
+they sat in plain text on `/boot`.
 
 **I keep my host keys in my own secret store.** You can import the door's key instead of letting the
 box generate it (`door-keygen --import`). It is sealed to the TPM the same way, and you know its
 fingerprint in advance.
 
-**My root key file lived on the box until now. Is that history gone after setup?** No. `commit`
-removes the current copies only. Old copies survive in ZFS snapshots, in backups of `/boot` or of the
+**My root key file lived on the box until now. Is that history gone after setup?** No. Deleting the
+key file removes the current copies only (the planned `commit` will do the same, and no more). Old copies survive in ZFS snapshots, in backups of `/boot` or of the
 root, and in freed disk blocks. Giving the pool a new key (`zfs change-key`) stops an old key from
 opening the pool by itself, but the key that actually encrypts your data, ZFS's master key, only
 changes if you re-encrypt the data (send and receive it into a new encrypted dataset). Treat the old key
 as exposed: rekey, delete the snapshots and backups you can, and re-encrypt if old copies may have left
 your hands.
 
-**I set this up and the box did not unlock.** That is what the rehearsal is for: during setup, the box
-waits a few minutes for a delivery and then boots with its old local key. You only remove the local key
-(`commit`) after a reboot that the door actually unlocked. The waiting-then-fall-back step is built
-into the boot scripts; the commands that start and end a rehearsal are not.
+**I set this up and the box did not unlock.** That is why you keep the old key file until a
+reboot has been unlocked through the door. The planned rehearsal makes the box wait a few minutes for
+a delivery and then boot with its old local key; the waiting-then-fall-back step is in the boot scripts
+already, but 0.1.0 has no command that turns it on, so use the console prompt and the key you kept.
 
 ## How it compares
 
@@ -365,10 +446,10 @@ the key never lives on the machine and every unlock is a decision.
 
 ## Roadmap
 
-The order is: the tailnet door and its enrollment, delivery and approvals, then the lifecycle
-commands and packaging for a first release on Debian 13 with ZFS. After that come dracut for Debian
-14, the `measured` profile, and LUKS. The design, the test plan and the table of what is built are in
-[DESIGN.md](DESIGN.md).
+After 0.1.0 the order is: delivery and approvals (the keyholder, `deliver`, `watch`), then the
+rehearsal, `commit` and the other lifecycle commands, then dracut for Debian 14, the `measured`
+profile, and LUKS. The design, the test plan and the table of what is built are in
+[DESIGN.md](DESIGN.md), and every release's changes are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Where to ask
 

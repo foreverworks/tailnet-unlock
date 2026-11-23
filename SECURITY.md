@@ -3,13 +3,26 @@
 tailnet-unlock sits in early boot and handles the key that opens an encrypted root, so a
 vulnerability here matters. Thank you for reporting one responsibly.
 
+## Supported versions
+
+| Version | Supported |
+|---|---|
+| 0.1.x (the latest release) | Yes: security fixes go into a new 0.1 release. |
+| Anything older, and unreleased commits on `main` | No. Move to the latest release. |
+
+Until 1.0, only the newest release is supported, and a fix may change behaviour a box depends on; the
+release notes in [CHANGELOG.md](CHANGELOG.md) say so when it does.
+
 ## State of the software
 
-tailnet-unlock is unfinished and has no release. The door, the sealing of its key to the TPM, the
-initramfs hook and the boot scripts exist and are tested in a Debian 13 container; the commands that
-set up and run a real box end to end do not (see [README.md](README.md) and section 16 of
-[DESIGN.md](DESIGN.md)). It has had no independent security audit. Do not rely on it to protect, or
-to keep you able to reach, a machine you cannot get to by other means.
+tailnet-unlock 0.1.0 is early software. It covers the box side: the door on the machine's own address
+and on a tailnet, the sealing of the door's key to the TPM, the initramfs hook and boot scripts,
+`enroll`, `verify`, `status`, `disable --tailnet` and the Debian package. Delivery of the key by a
+keyholder after an approval, the safe test reboot, `rotate` and the other lifecycle commands are not
+built (see [README.md](README.md) and section 16 of [DESIGN.md](DESIGN.md)). It is tested in a Debian 13
+container, under QEMU and in virtual machines in CI, and has not yet run on real hardware. It has had
+no independent security audit. Do not rely on it to protect, or to keep you able to reach, a machine
+you cannot get to by other means.
 
 Because it runs in early boot, a fault can leave a remote machine waiting at a prompt. Keep a
 console (a provider's KVM or serial console, a rescue system, a person on site), test on a machine
@@ -33,7 +46,10 @@ we plan to do about it. Please give us a reasonable time to fix the problem befo
 - The initramfs scripts (`initramfs/`): the door, the supervisor, the unseal step, the panic handler
   and the hook that builds the image.
 - The command line tool and its Python package (`src/tailnet_unlock/`): configuration, rendering,
-  sealing, key handling and the keyholder side of the approval.
+  sealing, key handling, enrollment and the keyholder side of the approval.
+- The Debian package: its maintainer scripts, the trigger and the removal guard (`packaging/`), and how
+  the package is built and released (`tools/build-deb` and the release workflow), including its
+  checksums and provenance attestation.
 - The way the door key, the root key and the approval are handled: anything that leaks a key, accepts
   a forged or replayed approval, lets an unauthorised party present the door's identity, or leaves a
   box unable to boot when it should have a way in.
