@@ -1,6 +1,7 @@
-"""Everything that runs `tailscale` or `tailscaled` (DESIGN.md sections 7.4 and 13.2).
+"""Everything on the box that runs `tailscale` or `tailscaled` (DESIGN.md sections 7.4 and 13.2).
 
-This is the one module that does. Door keys, sealing, the container, the configuration and the
+This is the one module that does, besides the keyholder's `tailscale status` (keyholder/cli.py).
+Door keys, sealing, the container, the configuration and the
 rendering never import it, so the uplink door's commands work on a box with no Tailscale installed.
 `enroll` and `disable --tailnet` use it to run a second tailscaled of their own beside the box's
 node, and `verify` uses it to read a version.

@@ -16,13 +16,13 @@ strict = true
 disallow_any_explicit = true
 warn_unused_ignores = true
 mypy_path = "src:tests:tests/vm"
-files = ["src", "tests", "tools"]
+files = ["src", "tests", "tools", "examples"]
 explicit_package_bases = true
 
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-src = ["src", "tests", "tools"]
+src = ["src", "tests", "tools", "examples"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "ANN", "S", "C4", "PIE", "RET", "PL"]
@@ -38,7 +38,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["tailnet_unlock", "keys", "shellenv", "swtpm", "imagekit", "harness", "tsfake", "guests", "tailnet"]
+known-first-party = ["tailnet_unlock", "keys", "khkit", "shellenv", "swtpm", "imagekit", "harness", "tsfake", "guests", "tailnet"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S108", "PLC0415", "RUF001"]  # tests hold hostile and look-alike input on purpose

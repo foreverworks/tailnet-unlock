@@ -1,8 +1,8 @@
 """The `tailnet-unlock` command line (DESIGN.md section 12.5).
 
-`door-keygen`, `seal`, `render-initramfs`, `pins` and `fingerprint`, and the box's lifecycle:
-`enroll`, `verify`, `status` and `disable --tailnet`. The rest (`deliver`, `commit`, `rotate`)
-are planned.
+`door-keygen`, `seal`, `render-initramfs`, `pins` and `fingerprint`, the box's lifecycle
+(`enroll`, `verify`, `status` and `disable --tailnet`), and the keyholder's commands
+(keyholder/cli.py). The rest (`commit`, `rotate`) are planned.
 """
 
 import argparse
@@ -23,8 +23,9 @@ from tailnet_unlock.config import BoxConfig, parse_box_config, unlock_hostname
 from tailnet_unlock.disable import DISABLE_SCHEMA, disable_tailnet
 from tailnet_unlock.doorkey import fingerprint
 from tailnet_unlock.enroll import ENROLL_SCHEMA, EnrollRequest, enroll
-from tailnet_unlock.errors import ConfigError, DoorKeyError, ToolError, TpmError
+from tailnet_unlock.errors import ConfigError, ContractError, DoorKeyError, ToolError, TpmError
 from tailnet_unlock.images import rebuild
+from tailnet_unlock.keyholder import cli as keyholder_cli
 from tailnet_unlock.node import node_json, read_node
 from tailnet_unlock.render import BuildFacts, render_conf
 from tailnet_unlock.seal import (
@@ -404,6 +405,8 @@ def parser() -> argparse.ArgumentParser:
     )
     fp.add_argument("public_key")
     fp.set_defaults(handler=_cmd_fingerprint)
+
+    keyholder_cli.add_commands(commands)
     return top
 
 
@@ -413,7 +416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         signal.signal(number, _on_signal)
     try:
         code: int = args.handler(args)
-    except (ConfigError, DoorKeyError, TpmError, ToolError, OSError) as error:
+    except (ConfigError, ContractError, DoorKeyError, TpmError, ToolError, OSError) as error:
         print(f"tailnet-unlock: {error}", file=sys.stderr)
         return 2
     return code
