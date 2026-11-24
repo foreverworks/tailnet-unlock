@@ -8,6 +8,7 @@ the real edges: ssh, the approver, the key source, the hooks, `tailscale status`
 import argparse
 import getpass
 import json
+import os
 import secrets
 import shutil
 import signal
@@ -185,6 +186,11 @@ def _key_source(argv: Argv) -> bytes:
 
 
 def _typed_key(host: str) -> bytes:
+    # without a terminal getpass reads stdin instead and echoes it
+    try:
+        os.close(os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY))
+    except OSError as error:
+        raise ToolError("the key is typed at a terminal, and there is none") from error
     return getpass.getpass(f"Root key of {host}: ").encode("utf-8")
 
 
@@ -229,10 +235,14 @@ def _recorder(state_dir: Path, host: str) -> Callable[[AuditLine, Outcome], None
     def record(line: AuditLine, outcome: Outcome) -> None:
         text = json.dumps(line)
         append_audit(state_dir, text)
-        if outcome.result == "delivered":
-            write_last_unlock(state_dir, host, _now())
-            clear_planned(state_dir, host)
         print(text, flush=True)
+        if outcome.result == "delivered":
+            # the key is in: what cannot be noted about it does not make the delivery a failure
+            try:
+                write_last_unlock(state_dir, host, _now())
+                clear_planned(state_dir, host)
+            except OSError as error:
+                _say(f"{host}: delivered, and the state could not be written: {error}")
 
     return record
 

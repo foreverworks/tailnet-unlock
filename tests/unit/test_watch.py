@@ -2,13 +2,13 @@
 level)."""
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 import pytest
 
 from khkit import NOW, make_host, make_view
-from tailnet_unlock.errors import ToolError
+from tailnet_unlock.errors import ConfigError, ToolError
 from tailnet_unlock.keyholder.approval import Reason
 from tailnet_unlock.keyholder.config import Argv, HostConfig
 from tailnet_unlock.keyholder.door import Target
@@ -306,6 +306,21 @@ def test_one_second_read_for_every_suspect() -> None:
     world = World(views=[BOTH])
     run_pass(make_edge(world), (PLAIN, HOOKED))
     assert world.slept == [60]
+
+
+def test_a_host_that_cannot_be_decided_stops_no_other() -> None:
+    world = World()
+
+    def read(host: HostConfig) -> Memory:
+        if host is PLAIN:
+            raise ConfigError("a corrupt state file")
+        return world.memory
+
+    said: list[str] = []
+    edge = replace(make_edge(world), read_memory=read, say=said.append)
+    assert not run_pass(edge, (PLAIN, HOOKED))
+    assert [argv for argv, _ in world.hooks] == [("told",)]
+    assert said == ["web-1: this pass decided nothing more: a corrupt state file"]
 
 
 def test_a_failed_second_read_decides_nothing() -> None:

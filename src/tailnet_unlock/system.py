@@ -60,6 +60,7 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
     """Write beside the file and rename into place, so a reader never sees half of it."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     staging = path.with_name(f".{path.name}.new.{os.getpid()}")
+    staging.unlink(missing_ok=True)  # left by a process that had this pid and was killed
     fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
         with os.fdopen(fd, "wb") as handle:

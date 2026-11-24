@@ -59,6 +59,7 @@ def status_json(
     unlock: bool | None = True,
     direct: bool = True,
     backend: str = "Running",
+    endpoint: str = "198.51.100.7:41641",
 ) -> str:
     """`tailscale status --json` with the box's own and unlock nodes; None leaves one out."""
     peers: dict[str, object] = {}
@@ -77,15 +78,20 @@ def status_json(
             "DNSName": "web-1-unlock.tailnet.example.",
             "TailscaleIPs": ["2001:db8::102", "192.0.2.102"],
             "Online": unlock,
-            "CurAddr": "198.51.100.7:41641" if direct else "",
+            "CurAddr": endpoint if direct else "",
             "Relay": "fra",
             "Addrs": ["198.51.100.7:41641", "192.0.2.10:41641"],
         }
     return json.dumps({"BackendState": backend, "Self": {"ID": "nME"}, "Peer": peers})
 
 
-def make_view(own: bool | None = False, unlock: bool | None = True, direct: bool = True) -> View:
-    return parse_view(status_json(own, unlock, direct))
+def make_view(
+    own: bool | None = False,
+    unlock: bool | None = True,
+    direct: bool = True,
+    endpoint: str = "198.51.100.7:41641",
+) -> View:
+    return parse_view(status_json(own, unlock, direct, endpoint=endpoint))
 
 
 def door_status(

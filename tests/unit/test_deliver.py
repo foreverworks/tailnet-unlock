@@ -181,6 +181,22 @@ def test_another_door_after_the_approval_gets_nothing(again: DoorRead) -> None:
     assert world.sent == []
 
 
+def test_another_site_after_the_approval_gets_nothing() -> None:
+    world = World()
+    elsewhere = make_view(endpoint="203.0.113.9:41641")
+    world.view = lambda _: elsewhere if world.requests else make_view()
+    outcome, _ = run(world)
+    assert (outcome.result, world.sent) == ("refused", [])
+    assert "another site" in outcome.detail
+
+
+def test_a_path_gone_idle_after_the_approval_is_no_other_site() -> None:
+    world = World()
+    world.view = lambda _: make_view(direct=False) if world.requests else make_view()
+    outcome, _ = run(world)
+    assert outcome.result == "delivered"
+
+
 def test_a_short_outage_after_the_approval_is_ridden_out() -> None:
     world = World()
     outages = [UNREACHABLE, UNREACHABLE]

@@ -246,6 +246,9 @@ def changed_since(approved: DoorStatus, again: DoorStatus) -> str | None:
     for name, before, after in (
         ("root", approved["waiting_for"], again["waiting_for"]),
         ("key format", approved["keyformat"], again["keyformat"]),
+        ("boot profile", approved["profile"], again["profile"]),
+        ("seal", approved["seal"], again["seal"]),
+        ("backend", approved["backend"], again["backend"]),
     ):
         if before != after:
             return f"the door names another {name} than the one approved"
@@ -413,7 +416,7 @@ def _ask(edge: Edge, job: Job, found: Found, trace: Trace) -> Approved | Outcome
 
 
 def _check_again(edge: Edge, job: Job, found: Found) -> Outcome | None:
-    """Step 5: the same boot id, read again through the same single pin."""
+    """Step 5: the same boot, read again through the same single pin, from no other site."""
     read: DoorRead = DoorFailure("unreachable", "not tried")
     for attempt in range(job.timing.recheck_tries):
         if attempt:
@@ -425,6 +428,14 @@ def _check_again(edge: Edge, job: Job, found: Found) -> Outcome | None:
         result: Result = "failed" if read.kind == "unreachable" else "refused"
         return Outcome(result, f"after the approval: {read.detail}; a new approval is needed")
     changed = changed_since(found.status, read)
+    # The session just read carries the path as it is now. Only a site that contradicts the
+    # configuration refuses: a path gone idle or relayed is not news about where the box is.
+    if (
+        changed is None
+        and found.network["site_match"] != "no"
+        and network_of(job.host, found.target, edge.view())["site_match"] == "no"
+    ):
+        changed = "the door answers from another site than the one approved"
     return None if changed is None else Outcome("refused", changed)
 
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Literal, TypedDict
 
+from tailnet_unlock.errors import ConfigError, ToolError
 from tailnet_unlock.keyholder.approval import DoorKind, NetworkInfo, Reason, timestamp
 from tailnet_unlock.keyholder.config import Argv, HostConfig
 from tailnet_unlock.keyholder.deliver import door_targets
@@ -249,8 +250,44 @@ def _alarm(
     return replace(memory, alarm_told_at=now), True
 
 
+def _undecided(edge: WatchEdge, host: HostConfig, error: Exception) -> bool:
+    edge.say(f"{host.name}: this pass decided nothing more: {error}")
+    return False
+
+
+def _first_look(edge: WatchEdge, host: HostConfig, view: View | None) -> tuple[bool, bool]:
+    """Whether everything worked, and whether both nodes are online for the first time."""
+    memory = edge.read_memory(host)
+    seen = look(edge, host, view, memory)
+    after = remember_alarm(remember_waiting(memory, seen, edge.now()), seen)
+    worked, suspect = True, False
+    match situation(seen):
+        case "waiting":
+            after, worked = _waiting(edge, host, seen, view, after)
+        case "both-online" if after.alarm_since is None:
+            suspect = True
+        case "both-online":
+            after, worked = _alarm(edge, host, seen, view, after)
+        case "nothing":
+            pass
+    if after != memory:
+        edge.write_memory(host, after)
+    return worked, suspect
+
+
+def _second_look(edge: WatchEdge, host: HostConfig, view: View) -> bool:
+    # the uplink is not probed again: the alarm is about the two nodes
+    seen = Seen(presence(view, host.node), presence(view, host.unlock_node), None)
+    if situation(seen) != "both-online":
+        return True
+    memory, worked = _alarm(edge, host, seen, view, edge.read_memory(host))
+    edge.write_memory(host, memory)
+    return worked
+
+
 def run_pass(edge: WatchEdge, hosts: tuple[HostConfig, ...]) -> bool:
-    """One pass over every host; False when a hook failed.
+    """One pass over every host; False when a hook failed or a host could not be decided. One
+    host's failure (its state file, its hook, its probe) says so and stops no other host.
 
     The boxes that wait come first. A host with both nodes online, in no episode yet, is read once
     more after `alarm_after_seconds`; the second read is one for all of them.
@@ -259,31 +296,21 @@ def run_pass(edge: WatchEdge, hosts: tuple[HostConfig, ...]) -> bool:
     good = True
     suspects: list[HostConfig] = []
     for host in hosts:
-        memory = edge.read_memory(host)
-        seen = look(edge, host, view, memory)
-        after = remember_alarm(remember_waiting(memory, seen, edge.now()), seen)
-        match situation(seen):
-            case "waiting":
-                after, worked = _waiting(edge, host, seen, view, after)
-                good = good and worked
-            case "both-online" if after.alarm_since is None:
-                suspects.append(host)
-            case "both-online":
-                after, worked = _alarm(edge, host, seen, view, after)
-                good = good and worked
-            case "nothing":
-                pass
-        if after != memory:
-            edge.write_memory(host, after)
+        try:
+            worked, suspect = _first_look(edge, host, view)
+        except (ConfigError, ToolError, OSError) as error:
+            worked, suspect = _undecided(edge, host, error), False
+        good = good and worked
+        if suspect:
+            suspects.append(host)
     if not suspects:
         return good
     edge.sleep(max(host.settings.alarm_after_seconds for host in suspects))
     again = edge.view()
     for host in suspects:
-        # the uplink is not probed again: the alarm is about the two nodes
-        seen = Seen(presence(again, host.node), presence(again, host.unlock_node), None)
-        if situation(seen) == "both-online":
-            memory, worked = _alarm(edge, host, seen, again, edge.read_memory(host))
-            edge.write_memory(host, memory)
-            good = good and worked
+        try:
+            worked = _second_look(edge, host, again)
+        except (ConfigError, ToolError, OSError) as error:
+            worked = _undecided(edge, host, error)
+        good = good and worked
     return good

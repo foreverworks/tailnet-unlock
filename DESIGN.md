@@ -802,8 +802,10 @@ default, decision D17), so its key never collides with the real sshd's in a know
    `door.role = "recovery"` the keyholder refuses any approval that lacks
    `"recovery_acknowledged": true`, whatever its `decision` says.
 5. On approval, reads `status` again, through the same single-pin known-hosts file, and checks the same
-   boot id, root and key format; the door key is the same because the pin is. An unreachable door is
-   tried three times; any other answer is a refusal.
+   boot id, root, key format, boot profile, seal and backend; the door key is the same because the pin
+   is. An unreachable door is tried three times; any other answer is a refusal. The path is read again
+   too: a door that now answers from a site that contradicts `expected_endpoints` (`site_match` `"no"`,
+   where the approved request did not say so) is refused. A path gone idle or relayed is not.
 6. Runs the key source, normalises its output (10.6) and pipes it straight into `unlock <boot_id>`.
    The key is never in an argument, an environment variable, a log line, an exception or a file the
    keyholder writes. What the door prints besides its result is not kept, because a door could echo the
@@ -980,7 +982,8 @@ that answers while the own node still reads as online is left to the next pass: 
 a while to notice a box that went down.
 
 A `tailscale status --json` that fails, or whose `BackendState` is not `Running`, decides nothing: the
-pass exits 2 and runs no hook. A pass whose hook failed exits 1. Hosts that name no tailnet node at all
+pass exits 2 and runs no hook. A pass in which a hook failed, or a host could not
+be decided (its state file, its hook or its probe failed), exits 1; that host stops no other. Hosts that name no tailnet node at all
 need no Tailscale.
 
 **A box that waits.** With `on_waiting = [argv]` set, that hook runs, instead of a delivery being started
