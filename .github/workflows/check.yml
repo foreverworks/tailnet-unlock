@@ -1,6 +1,7 @@
 # One job on every push and pull request: shellcheck, mypy, ruff, the ignore check and the unit
 # tests (the busybox and dash tests included) on the newest stable Python, 3.15.2 (python.org,
-# read 2026-11-21), then builds the Debian package twice and requires the two to be byte-equal.
+# read 2026-11-21), then builds the Debian package and the keyholder's single file twice and requires
+# each two to be byte-equal.
 # The container tier installs that package (make deb, in the full workflow). It runs on
 # GitHub-hosted runners.
 name: check
@@ -46,3 +47,9 @@ jobs:
           tools/build-deb "$version" "$RUNNER_TEMP/deb2"
           cmp "$RUNNER_TEMP/deb1/tailnet-unlock_${version}_all.deb" "$RUNNER_TEMP/deb2/tailnet-unlock_${version}_all.deb"
           dpkg-deb -I "$RUNNER_TEMP/deb1/tailnet-unlock_${version}_all.deb"
+      - name: The keyholder's single file builds, the same twice, and runs
+        run: |
+          python tools/build_pyz.py "$RUNNER_TEMP/pyz1"
+          python tools/build_pyz.py "$RUNNER_TEMP/pyz2"
+          cmp "$RUNNER_TEMP/pyz1/tailnet-unlock-keyholder.pyz" "$RUNNER_TEMP/pyz2/tailnet-unlock-keyholder.pyz"
+          python -I "$RUNNER_TEMP/pyz1/tailnet-unlock-keyholder.pyz" --version

@@ -3,6 +3,28 @@
 All notable changes are listed here, newest first. The versions follow [semantic
 versioning](https://semver.org); until 1.0, a minor release may change behaviour.
 
+## Unreleased: 0.2.0
+
+### Added
+
+- The keyholder. `deliver` waits for a box's door on the tailnet or the uplink, checks the door's pinned
+  key, asks an approver of yours over a JSON contract, checks that the same boot still waits, and sends
+  the key on the SSH session's stdin, once. It has documented exit codes and writes one audit line per
+  attempt. `--idle-minutes` ends a delivery whose reboot never came.
+- `unlock` does the same by hand, with the question asked at the terminal, and `unlock --recovery` uses
+  the recovery door.
+- `watch` notices a box that waits at its door, and starts a delivery or runs an `on_waiting` program with
+  a JSON event. A watcher with that setting needs no SSH key and no root key: an uplink door proves itself
+  by its host key. It raises an alarm when an unlock node is online while its box runs. `planned`
+  announces a reboot.
+- `approver deny` and `approver tty`, `examples/keyholder.toml` and `examples/approver.py`.
+- `tailnet-unlock-keyholder.pyz`, the keyholder as one reproducible file for machines that are not Debian.
+- `make delivery`: deliveries end to end with dropbear and OpenSSH, in the test container.
+
+### Not in this release
+
+The approver that needs nothing but SSH, `pins add`, and `on_alarm = "expire"`, which is refused.
+
 ## 0.1.0
 
 The first release: the box side, for Debian 13 with root on ZFS, the `tpm` profile and

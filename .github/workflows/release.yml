@@ -1,7 +1,6 @@
 # A version tag: the full matrix and the VM scenarios gate a draft release. Its assets are the
-# Debian package, the source archive and their checksums, with a build provenance attestation for
-# each. The keyholder package and zipapp join the assets once they are built. The release stays a
-# draft until a person publishes it.
+# Debian package, the keyholder's single file, the source archive and their checksums, with a build
+# provenance attestation for each. The release stays a draft until a person publishes it.
 name: release
 on:
   push:
@@ -73,17 +72,21 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - name: Source archive and Debian package
+      - name: Source archive, Debian package and the keyholder's single file
         run: |
           version=${GITHUB_REF_NAME#v}
           mkdir assets
           git archive --format=tar.gz --prefix="tailnet-unlock-$version/" \
             -o "assets/tailnet-unlock-$version.tar.gz" "$GITHUB_SHA"
           tools/build-deb "$version" assets
-          # the same commit must give the same package
+          python3 tools/build_pyz.py assets
+          # the same commit must give the same package and the same file
           tools/build-deb "$version" again
+          python3 tools/build_pyz.py again
           cmp "assets/tailnet-unlock_${version}_all.deb" "again/tailnet-unlock_${version}_all.deb"
-          (cd assets && sha256sum "tailnet-unlock-$version.tar.gz" "tailnet-unlock_${version}_all.deb" >SHA256SUMS)
+          cmp assets/tailnet-unlock-keyholder.pyz again/tailnet-unlock-keyholder.pyz
+          (cd assets && sha256sum "tailnet-unlock-$version.tar.gz" "tailnet-unlock_${version}_all.deb" \
+            tailnet-unlock-keyholder.pyz >SHA256SUMS)
           cat assets/SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8  # v4.2.2
         with:

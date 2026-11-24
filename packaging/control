@@ -8,6 +8,7 @@ Maintainer: tailnet-unlock contributors <noreply@github.com>
 Homepage: https://github.com/foreverworks/tailnet-unlock
 Depends: python3 (>= 3.13), initramfs-tools, dropbear-bin, tpm2-tools, libtss2-tcti-device0t64, zfs-initramfs
 Recommends: tailscale (>= 1.86)
+Suggests: openssh-client
 Conflicts: dropbear-initramfs
 Description: unlock an encrypted ZFS root from anywhere on a tailnet
  Puts a small, locked-down SSH door into the initramfs, answering on the
@@ -19,3 +20,6 @@ Description: unlock an encrypted ZFS root from anywhere on a tailnet
  ZFS key-loading extension and the tailnet-unlock command. It replaces
  dropbear-initramfs, and a dpkg trigger rebuilds the initramfs images whenever
  the tailscaled they carry changes.
+ .
+ The command also has the keyholder's side, deliver and watch, for a machine
+ that holds root keys; that side needs openssh-client.

@@ -102,6 +102,8 @@ def test_the_version_is_the_same_everywhere() -> None:
     init = (REPO / "src" / "tailnet_unlock" / "__init__.py").read_text(encoding="utf-8")
     assert f'__version__ = "{version}"' in init
     changelog = (REPO / "CHANGELOG.md").read_text(encoding="utf-8")
-    first = re.search(r"^## (\S+)", changelog, re.MULTILINE)
-    assert first is not None
-    assert first.group(1) == version
+    entries = re.findall(r"^## (.+)$", changelog, re.MULTILINE)
+    # work since the last release is under "Unreleased: X.Y.Z"; the release workflow refuses that
+    released = [entry for entry in entries if not entry.startswith("Unreleased: ")]
+    assert released[0] == version
+    assert len(entries) - len(released) <= 1

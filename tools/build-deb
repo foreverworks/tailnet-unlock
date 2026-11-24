@@ -41,7 +41,9 @@ doc=$root/usr/share/doc/tailnet-unlock
 install -d "$doc/examples"
 install -m 0644 "$here/LICENSE" "$doc/copyright"
 install -m 0644 "$here/README.md" "$doc/README.md"
-install -m 0644 "$here/examples/box.toml" "$doc/examples/box.toml"
+for f in box.toml keyholder.toml approver.py policy.hujson; do
+	install -m 0644 "$here/examples/$f" "$doc/examples/$f"
+done
 gzip -9n <"$here/CHANGELOG.md" >"$doc/changelog.gz"
 gzip -9n <"$here/DESIGN.md" >"$doc/DESIGN.md.gz"
 chmod 0644 "$doc/changelog.gz" "$doc/DESIGN.md.gz"
