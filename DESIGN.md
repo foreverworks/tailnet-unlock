@@ -762,47 +762,83 @@ Two calls over SSH as `root`, both through the forced command (section 7.3, step
 `StrictHostKeyChecking=yes`, a known-hosts file generated from one pin at a time (the sealed pin; the
 recovery pin only where 10.2 step 2 allows it, and for `unlock --recovery`), so a session that
 connects proves which key the door presented, `HostKeyAlgorithms=ssh-ed25519`,
-`IdentitiesOnly=yes` and `BatchMode=yes`. A keyholder in userspace networking (a CI job, say) reaches the
-tailnet door through `ProxyCommand=tailscale nc %h %p`. The door listens on its own port (2222 by
+`IdentitiesOnly=yes` and `BatchMode=yes`. Nothing else takes part: `-F /dev/null`,
+`GlobalKnownHostsFile=/dev/null`, `UpdateHostKeys=no`, `ConnectTimeout=10`, `LogLevel=ERROR`, and the pin
+stands under a `HostKeyAlias` made from the host's name and the role, so the address dialed plays no
+part in the check. A keyholder in userspace networking (a CI job, say) sets
+`ssh_proxy_command = "tailscale nc %h %p"`, which is used for the tailnet door only. The tailnet door is
+dialed at the node's tailnet address, so no DNS is needed. The door listens on its own port (2222 by
 default, decision D17), so its key never collides with the real sshd's in a known-hosts file.
 
 ### 10.2 `deliver`, step by step
 
-`tailnet-unlock deliver <host> --reason planned|unplanned|manual [--by <who>]`:
+`tailnet-unlock deliver <host> --reason planned|unplanned|manual [--by <who>] [--note <text>]
+[--door tailnet|uplink|any] [--idle-minutes N]`:
 
 1. Takes the per-host lock in the keyholder's state directory; a second delivery for the same host
    exits at once. Watchers on several keyholders are the consumer's to coordinate (run one per host
-   set).
-2. Waits up to `door_wait_minutes` (default 30) for any configured door (tailnet by node id, uplink by
-   address) to answer `status` through a known-hosts file that holds the **sealed pin alone**. A door
+   set). A host with no approver configured is refused here.
+2. Waits up to `door_wait_minutes` (default 30; 0 is one try) for a configured door (the tailnet's
+   first, when its node is online, then the uplink's; `--door` names one) to answer `status` through
+   a known-hosts file that holds the **sealed pin alone**, and to say that the root waits for a key. A door
    that fails that host key check is tried with a known-hosts file holding the recovery pin alone
    only when `allow_recovery_delivery = true`; otherwise the delivery ends ("recovery door, manual
-   only"). **The door's role is the key the SSH client verified** (decision D31), never what the
+   only"), once the failed check has lasted two minutes (the box retries its TPM in that time, and
+   its door moves to the sealed key when one unseals, section 7.3) and the door has proved, to a client
+   that offers no key, that it holds the pinned recovery key. A server that holds neither pinned key is
+   not a door. **The door's role is the key the SSH client verified** (decision D31), never what the
    door reports: `door.role` is `"sealed"` when the session verified against the sealed pin and
    `"recovery"` when it verified against the recovery pin. A copy of `/boot` holds the recovery key
    unsealed and can answer `status` with `"key": "sealed"`; the keyholder ignores that field for
    every decision, and a door whose reported key differs from the verified one is refused and the
-   mismatch audited.
+   mismatch audited. A host without a TPM has only a recovery door: its configuration pins
+   `recovery_key` and no `door_key`, and everything here runs against that pin.
+   With `--idle-minutes N`, the delivery ends quietly as `not-needed`, with nobody asked, once the box's
+   own node has been online for N minutes in a row with no door answering: a planned delivery started
+   before a reboot that never comes. Without it the whole wait passes.
 3. Builds the approval request (10.3) from the verified role, the door's status, the keyholder's view
-   of the unlock node (10.4), the reason and the host's history.
+   of the path (10.4), the reason and the host's history.
 4. Runs the approver with the request on stdin. No approver configured means refused. For
    `door.role = "recovery"` the keyholder refuses any approval that lacks
    `"recovery_acknowledged": true`, whatever its `decision` says.
 5. On approval, reads `status` again, through the same single-pin known-hosts file, and checks the same
-   boot id and the same door key.
+   boot id, root and key format; the door key is the same because the pin is. An unreachable door is
+   tried three times; any other answer is a refusal.
 6. Runs the key source, normalises its output (10.6) and pipes it straight into `unlock <boot_id>`.
-   The key is never in an argument, an environment variable, a log line or a file the keyholder
-   writes.
-7. Waits for the box's own node to come online (the boot went on) and writes one audit line (10.8).
+   The key is never in an argument, an environment variable, a log line, an exception or a file the
+   keyholder writes. What the door prints besides its result is not kept, because a door could echo the
+   key. The key is sent once: `boot-mismatch` is a refusal (the next boot needs an approval of its own).
+7. Waits up to `node_wait_seconds` (default 300) for the box's own node to come online (the boot went
+   on), when `node` is configured. The key is loaded by then, so not seeing the node is a warning in
+   the result. A session that ended before the door's answer counts as delivered only when the box's
+   own node was offline before and comes online now. Then it writes one audit line (10.8).
 
-Exit codes say what happened: delivered, refused, timed out, door not found, wrong key.
+A stop (SIGTERM, SIGINT, SIGHUP) ends whatever runs at that moment: the approver's process group gets
+SIGTERM and 10 seconds, so it can cancel its request, nothing is sent, the audit line says `interrupted`
+and the lock is released. Exit codes:
+
+| Code | Result | Meaning |
+|---|---|---|
+| 0 | `delivered` | the door says the key is loaded (`warnings` may say more) |
+| 2 | none | usage or configuration error; nothing was tried and nothing audited |
+| 3 | `refused` | the approver refused, its answer was not a valid approval, or the door was not the one approved |
+| 4 | `approval-timeout` | no answer within `approval_timeout_seconds` |
+| 5 | `door-not-found` | no door within `door_wait_minutes` |
+| 6 | `wrong-key` | the door says the key is wrong; it keeps waiting |
+| 7 | `not-needed` | `--idle-minutes` passed with the box up |
+| 8 | `recovery-only` | only the recovery door answers, and automated delivery may not use it |
+| 9 | `busy` | another delivery for the host is under way |
+| 10 | `failed` | after a door was found: the key source, the door, or the session failed |
+| 128+n | `interrupted` | stopped by signal n |
 
 ### 10.3 The approver contract
 
 An approver is any executable, configured as an argument list (never run through a shell). It gets one
 JSON request on stdin, must print one JSON response on stdout, and exit 0. Anything else (a non-zero
 exit, no output, malformed output, a different request id, a response after `expires_at`, the
-timeout, default 15 minutes, after which it is killed) is a refusal. It never sees the key.
+timeout, default 15 minutes) is a refusal. It never sees the key. It runs in a process group of its
+own: at the timeout, or when `deliver` is stopped, the group gets SIGTERM and 10 seconds to clean up,
+and then SIGKILL; whatever it leaves running when it exits is killed too. Its stderr is `deliver`'s.
 
 Request:
 
@@ -863,8 +899,10 @@ Response:
 For `door.role = "recovery"`, an approval also needs `"recovery_acknowledged": true`, and is only
 asked for at all when `allow_recovery_delivery = true`.
 
-**Binding, and who enforces it.** The request id is random (128 bits) and recorded as used once a
-delivery ends; the response must name it; `expires_at` bounds it; `door.role` comes from the verified
+`door.address` is how a person knows the door: the unlock node's name, or the uplink's address.
+
+**Binding, and who enforces it.** The request id is random (128 bits), made for one run of the approver,
+whose answer is judged once, and recorded in the audit line; the response must name it; `expires_at` bounds it; `door.role` comes from the verified
 host key, never from the door's report; step 5 of `deliver` rechecks the boot id and the door key; the
 recovery gate is checked before the approver runs; a recovery approval without
 `"recovery_acknowledged": true` is refused. All of that is enforced by the keyholder. The door enforces two things only: the authorized SSH key and its role, and that
@@ -885,59 +923,33 @@ needed, and it works the same with headscale.
 keyholder exchanged packets with, and `site_match` is `"yes"` or `"no"` against `expected_endpoints`.
 On a relayed path, `observed_endpoint` is null, only the node's own reports remain (a modified client
 can invent them), and `site_match` is always `"unverified"`, whatever the reports say. The request
-shows endpoints; it does not prove where the door is.
+shows endpoints; it does not prove where the door is. With no `expected_endpoints`, `site_match` is
+`"unverified"`. For the uplink door the path is direct and the observed endpoint is the address the
+keyholder connected to, which comes from its own configuration.
 
-### 10.5 Built-in approvers, and a complete one that needs nothing but SSH
+**Finding the node.** The unlock node is found by `unlock_node_id` when it is set, and otherwise by the
+name `unlock_node`: the whole DNS name, then its first label, which the control server keeps unique,
+then a host name that exactly one peer reports. The box's own node is found the same way (`node_id`,
+`node`). A name, like an id, is only for finding: the pinned host key authenticates the door. A node the
+keyholder does not see counts as offline (and `watch` says so when it is the box's own: the policy has
+to show it, section 7.5).
 
-Built in: `deny` (what an empty setting means), `tty` (used by the interactive `unlock`: shows the
-request and asks the operator to type the host name) and `ssh`, below. There is deliberately no
-approver that says yes on its own.
+### 10.5 Built-in approvers, and one of your own
 
-**The SSH approver.** The approval is an SSH login by a person, ideally with a FIDO2 security key, so a
-touch is the approval.
+Built in: `tailnet-unlock approver deny` (an empty setting refuses too) and `tailnet-unlock approver
+tty`, which the interactive `unlock` uses: it shows the request at the terminal and asks the operator to
+type the host name, and for a recovery door asks about that first. There is deliberately no approver that
+says yes on its own. `examples/approver.py` is a complete one for an HTTPS service of the consumer's own;
+it takes its request back when it gets SIGTERM.
 
-Setup on the keyholder:
-
-```
-# a dedicated account whose only purpose is to approve
-useradd --system --create-home unlock-approve
-# in ~unlock-approve/.ssh/authorized_keys, one line per person, the options followed by that
-# person's public key (a security key made with `ssh-keygen -t ed25519-sk`):
-restrict,pty,command="tailnet-unlock approver ssh respond --as alice" <alice's ed25519-sk public key>
-```
-
-```
-# /etc/ssh/sshd_config.d/tailnet-unlock-approve.conf: lets the forced command read which key logged in
-Match User unlock-approve
-    ExposeAuthInfo yes
-```
-
-In `keyholder.toml`:
-
-```toml
-[defaults]
-approver = ["tailnet-unlock", "approver", "ssh", "request"]
-# optional: anything that tells a person a request is waiting (mail, a push service). Empty here.
-notify = []
-```
-
-Flow:
-
-1. `deliver` runs `tailnet-unlock approver ssh request`, which writes the request to
-   `/var/lib/tailnet-unlock/keyholder/approvals/pending/<request_id>.json` (readable by the
-   `unlock-approve` account), runs `notify` if set, and waits.
-2. The operator runs `ssh -t unlock-approve@keyholder` and touches the key. The forced command lists
-   pending requests, prints the one chosen in full (host, reason, door and its role, what the door
-   says about itself, endpoints, site match), and asks for the host name to approve or `no` to refuse.
-   A recovery request says so first and asks separately.
-3. It writes `decided/<request_id>.json` with `by` set to the name from the line (`--as alice`) and the
-   fingerprint of the key that logged in, read from the file `$SSH_USER_AUTH` names, which sshd provides
-   only with `ExposeAuthInfo yes`. It exits.
-4. The waiting approver reads the decision, prints the response, and exits 0. Timeout or refusal: no
-   key is sent.
-
-Nothing in this example leaves SSH, and the same pattern works with an approver on another machine:
-the hook can `ssh` there instead of writing a local spool.
+**The SSH approver, not built yet.** The approval would be an SSH login by a person, ideally with a FIDO2
+security key, so a touch is the approval: `approver ssh request` leaves the request in a spool that a
+dedicated account can read, waits, and prints the decision that `approver ssh respond` wrote after the
+person logged in to that account. The forced command names the person, and the key that logged in is
+read from the file `$SSH_USER_AUTH` names, which sshd provides only with `ExposeAuthInfo yes`. It needs a
+spool shared between two accounts, whose permissions are most of the work, so it comes after the rest
+of delivery. Until then the same thing is an approver of a few lines that runs `ssh` to a machine where
+a person answers.
 
 ### 10.6 The key source contract
 
@@ -946,36 +958,97 @@ An argument list per host, run without a shell, that prints the key on stdout an
 or `["cat", "/srv/keys/web-1.key"]` on an encrypted keyholder disk. At most 513 bytes are read. For
 `passphrase` and `hex` keys (the door's `status` reports the `keyformat`) exactly one trailing newline
 is removed; a `raw` key must be exactly 32 bytes. The result goes into the SSH session's stdin and
-nowhere else.
+nowhere else. The command's stderr is discarded, so nothing it says there can put the key in a log, and
+it has two minutes. `unlock` uses it when it is configured and asks at the terminal when it is not.
 
 ### 10.7 The watcher and the alarm
 
-`tailnet-unlock watch` makes one pass and exits, for a timer, cron or a scheduled CI job (or loops with
-`--every`). Each pass reads `tailscale status --json` once, and for each configured host:
+`tailnet-unlock watch [<host>...]` makes one pass and exits, for a timer, cron or a scheduled CI job (or
+loops with `--every <seconds>`). Each pass reads `tailscale status --json` once, and for each configured
+host:
 
 | Box's own node | Unlock node | Action |
 |---|---|---|
 | online | offline | nothing |
-| offline | online | the box waits at its door: start `deliver --reason unplanned`, unless a planned marker (`tailnet-unlock planned <host> --by <who> --for 30m`) makes it `planned` |
-| online | online | **alarm**: read again after 60 seconds; if it persists, act on `on_alarm`. Something is using the unlock identity while the box runs. |
-| offline | offline | nothing (the box is down or between states) |
+| offline | online | the box waits at its door |
+| online | online | **alarm**: read again after `alarm_after_seconds` (default 60); if it persists, run the `alarm` hook. Something is using the unlock identity while the box runs. |
+| offline | offline | nothing (the box is down or between states), unless the uplink door answers: then the box waits at its door |
 
 The uplink door is probed too for hosts that have one, so a box whose tailnet door is down is still
-found.
+found. A host with no `node` configured is judged by its doors alone and raises no alarm. An uplink door
+that answers while the own node still reads as online is left to the next pass: the control plane takes
+a while to notice a box that went down.
 
-`on_alarm = "alert" | "expire"` (decision D24). `alert`, the default, runs the `alarm` hook. `expire`
-also expires the unlock node's key through the control plane's API (which needs an API credential with
-device write access): it stops a cloned identity at once, and also takes away the tailnet door at the
-next genuine reboot until a re-enrollment, which strands a box behind NAT. Neither deletes the node.
-An enrollment shows the unlock node online for a few seconds while the box runs; a watcher pass in that
-window raises the alarm once, as it should.
+A `tailscale status --json` that fails, or whose `BackendState` is not `Running`, decides nothing: the
+pass exits 2 and runs no hook. A pass whose hook failed exits 1. Hosts that name no tailnet node at all
+need no Tailscale.
+
+**A box that waits.** With `on_waiting = [argv]` set, that hook runs, instead of a delivery being started
+here, on every pass while the box waits, with one JSON event on stdin; the hook dedupes. Without it, the
+watcher starts `deliver` for the host as its child (`--reason unplanned`, or `planned` with the marker's
+`--by` and `--note` after `tailnet-unlock planned <host> --by <who> --for 30m`; a delivery that succeeds
+uses the marker up), goes on with the other hosts, and waits for its children before it exits, so a timer's
+unit lasts as long as the delivery and takes it along when it is stopped. A delivery that ended without
+unlocking is tried again after `redeliver_minutes` (default 30), so a refusal does not bring the same
+question back every minute. `waiting_since` is kept in the state directory from the first pass that saw the
+box wait until its own node is online and no door answers.
+
+**A watcher needs no key.** A configuration with `on_waiting` and neither `ssh_key` nor `key_command` is a
+watch-only one. The uplink probe offers no SSH key then, and the door proves itself by its host key alone:
+a login that OpenSSH refuses *after* it verified the single pin ("Permission denied" from a client with
+that one pin) counts as "a door answers", and a host key check that fails does not. The sealed pin is
+tried first, then the recovery pin, and the event says which (`role`). A server chooses some of the text
+OpenSSH prints before its key is verified (a disconnect message, with line breaks of its own), but only
+behind OpenSSH's words, so the refusal counts only when it is the whole of stderr. The tests run the real
+client against dropbear, OpenSSH and a server that forges the text.
+
+The event, on the hook's stdin and on the watcher's stdout:
+
+```json
+{
+  "schema": "tailnet-unlock.watch-event/1",
+  "kind": "waiting",
+  "created_at": "2026-11-24T10:05:00Z",
+  "host": "web-1",
+  "reason": {"kind": "unplanned", "started_by": null, "note": null},
+  "waiting_since": "2026-11-24T10:00:00Z",
+  "alarm_since": null,
+  "own_node": "offline",
+  "unlock_node": "online",
+  "doors": [
+    {"kind": "tailnet", "role": null, "address": "web-1-unlock"},
+    {"kind": "uplink", "role": "sealed", "address": "192.0.2.10"}
+  ],
+  "network": {
+    "path": "direct",
+    "observed_endpoint": "198.51.100.7:41641",
+    "relay": null,
+    "reported_endpoints": ["198.51.100.7:41641"],
+    "expected": ["198.51.100.0/24"],
+    "site_match": "yes"
+  }
+}
+```
+
+`kind` is `waiting` or `alarm`. `reason` says whether the reboot was planned. `own_node` and `unlock_node`
+are null for a host that names none. A door's `role` is null when nothing was verified: the tailnet entry
+means that the unlock node is online. `network` is 10.4's view, null when no door is seen.
+
+**The alarm** is told once per episode, then at most every `alarm_repeat_hours` (default 24) while the two
+nodes stay online together; a hook that failed was not told, and the next pass tries again. `on_alarm`
+is `"alert"`, the only value built (decision D24); `"expire"`, which would expire the unlock node's key
+through the control plane's API, is refused as a configuration error, because it needs an API credential
+with device write access that nothing else here holds. It would stop a cloned identity at once, and also
+take away the tailnet door at the next genuine reboot until a re-enrollment, which strands a box behind
+NAT. An enrollment shows the unlock node online for a few seconds while the box runs; the second read is
+what keeps that from raising the alarm.
 
 ### 10.8 Audit
 
-One JSON line per delivery attempt on stdout and in `/var/log/tailnet-unlock/audit.jsonl`: time,
-host, request id, reason, door and its role, door key fingerprint, boot id, path and endpoints, the
-approver's decision and `by`, the result. Never the key. A test greps every log the suite produces for
-the key bytes (section 15).
+One JSON line per delivery attempt on stdout and in the state directory's `audit.jsonl`
+(`tailnet-unlock.audit/1`): time, host, result, detail, warnings, reason, request id, door and its role,
+door key fingerprint, boot id, path and endpoints, the approver's decision and `by`. Never the key. Tests
+search every log, file, argument and environment the suite produces for the key bytes (section 15).
 
 ## 11. LUKS
 
@@ -1011,20 +1084,18 @@ compare two builds).
 | Conflicts | `dropbear-initramfs` (decision D2) |
 | Triggers | `interest-noawait /usr/sbin/tailscaled` |
 
-**Split, when the keyholder arrives.** The package then becomes one source package with three binary
-packages, all `Architecture: all`:
+**The keyholder is in the same package.** `deliver`, `unlock`, `watch`, `planned` and `approver` are
+commands of `tailnet-unlock` and need `openssh-client` (a Suggests). A split into a box package, a
+keyholder package and the shared Python package waits until somebody wants the keyholder as a `.deb`
+without the box side.
 
-| Package | Contents | Depends |
-|---|---|---|
-| `tailnet-unlock` | the box side above | `python3-tailnet-unlock`, and the rest of the table above |
-| `tailnet-unlock-keyholder` | `deliver`, `unlock`, `watch`, approvers, examples | `python3-tailnet-unlock`, `openssh-client` |
-| `python3-tailnet-unlock` | the Python package both use | `python3 (>= 3.13)` |
-
-For keyholders that are not Debian (a laptop, a CI image): a single-file zipapp,
-`tailnet-unlock-keyholder.pyz`, attached to each release; the code uses the standard library only.
+For keyholders that are not Debian boxes (a laptop, a CI image): a single-file zipapp,
+`tailnet-unlock-keyholder.pyz`, attached to each release. It holds the package, starts the keyholder's
+commands, runs isolated (`python3 -I`) and uses the standard library only. `tools/build_pyz.py` writes
+it, uncompressed and with the commit's time, so it is reproducible like the `.deb`.
 
 **Distribution.** A tag `vX.Y.Z` runs the full test matrix, and then creates a draft GitHub release
-whose assets are the `.deb`, the source archive and `SHA256SUMS`, each with a GitHub build provenance
+whose assets are the `.deb`, the keyholder's zipapp, the source archive and `SHA256SUMS`, each with a GitHub build provenance
 attestation (`gh attestation verify`). A person publishes the draft. The release workflow refuses a
 tag that differs from the version in `pyproject.toml`, `src/tailnet_unlock/__init__.py` and the newest
 entry of `CHANGELOG.md`, and a tag whose commit is not on `main`. An apt repository comes once there
@@ -1060,8 +1131,8 @@ and never fails the package), and on `purge` deletes `/etc/tailnet-unlock` and `
 | `/var/lib/tailnet-unlock/tailnet/unlock.state` | The unlock node's state, sealed by tailscaled |
 | `/var/lib/tailnet-unlock/pins.toml` | Public: what keyholders pin (sealed and recovery fingerprints, node id, addresses) |
 | `/etc/zfs/initramfs-tools-load-key.d/tailnet-unlock` | The ZFS load-key extension |
-| `/etc/tailnet-unlock/keyholder.toml` | Keyholder configuration (or `$XDG_CONFIG_HOME/tailnet-unlock/keyholder.toml`) |
-| `/var/lib/tailnet-unlock/keyholder/` | Locks, planned markers, used request ids, the SSH approver's spool |
+| `/etc/tailnet-unlock/keyholder.toml` | Keyholder configuration (`--config` names another) |
+| `/var/lib/tailnet-unlock/keyholder/` | The keyholder's state (`--state-dir` names another): `locks/`, `planned/`, `history/`, `watch/` and `audit.jsonl`; 0700, no secret in it |
 
 ### 12.3 `box.toml`
 
@@ -1105,26 +1176,42 @@ and `tailnet-unlock disable --tailnet` deletes the sealed state (and the node, g
 
 ```toml
 [defaults]
+tailscale = ["tailscale"]              # how to run the CLI, e.g. with --socket=...
 ssh_key = "/etc/tailnet-unlock/keyholder/id_ed25519"
-approver = ["tailnet-unlock", "approver", "ssh", "request"]
+ssh_proxy_command = "tailscale nc %h %p"   # unset by default; for userspace networking
+approver = ["/usr/local/lib/tailnet-unlock/approver"]   # empty: every delivery is refused
 approval_timeout_seconds = 900
 door_wait_minutes = 30
-alarm = ["logger", "-t", "tailnet-unlock", "alarm"]
-on_alarm = "alert"                     # or "expire"
+node_wait_seconds = 300
 allow_recovery_delivery = false
+on_waiting = []                        # empty: `watch` starts `deliver`
+redeliver_minutes = 30
+alarm = ["logger", "-t", "tailnet-unlock", "alarm"]
+on_alarm = "alert"                     # the only value built
+alarm_after_seconds = 60
+alarm_repeat_hours = 24
+hook_timeout_seconds = 60
 
 [hosts.web-1]
-node = "web-1"                         # the box's own tailnet node
+node = "web-1"                         # the box's own tailnet node; or node_id
 key_command = ["pass", "show", "unlock/web-1"]
 expected_endpoints = ["198.51.100.0/24"]
+# any key of [defaults] but tailscale, for this host alone
 
 [hosts.web-1.door]                     # pasted from the box's pins.toml
 port = 2222
 door_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEONLYdoorkey"
 recovery_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEONLYrecoverykey"
-unlock_node_id = "nEXAMPLE1CNTRL"
+unlock_node_id = "nEXAMPLE1CNTRL"      # or unlock_node = "web-1-unlock"
 uplink = "192.0.2.10"
+# uplink_port = 2222                   # when it differs from port: a router's forwarded port
 ```
+
+Every command is an argument list that runs without a shell; `ssh_proxy_command` alone is a line, because
+OpenSSH takes it as one. An unknown key, a key or an unlock node id that two hosts share, a host with
+neither `door_key` nor `recovery_key`, and one with neither an uplink nor an unlock node are errors. What a
+command needs is checked when it runs (`deliver` an `ssh_key` and a `key_command`, `watch` a hook or what
+a delivery needs), so a watch-only file parses.
 
 ### 12.5 Commands
 
@@ -1178,8 +1265,19 @@ on a usage, configuration or tool error):
   while `enroll`, `verify`, `status` and `disable` take the state directory itself
   (`/var/lib/tailnet-unlock`). `pins --port` defaults to `door.port` in `box.toml`.
 
-Keyholder: `pins add <pins.toml>`, `unlock <host> [--recovery]`, `deliver <host>`, `watch`,
-`planned <host>`, `approver {ssh,tty,deny} ...`, `audit`.
+Keyholder, all built but two (every one but `approver` takes `--config FILE` and `--state-dir DIR`):
+
+- `deliver <host> --reason planned|unplanned|manual [--by WHO] [--note TEXT] [--door tailnet|uplink|any]
+  [--idle-minutes N]` (section 10.2).
+- `unlock <host> [--recovery] [--door ...]`: the same steps by hand. The `tty` approver asks at this
+  terminal whatever `approver` says, and the key is typed when no `key_command` is configured.
+  `--recovery` uses the recovery pin alone, and needs no `allow_recovery_delivery`: the flag is the
+  person's decision, and the approver still asks about the role.
+- `watch [<host>...] [--every SECONDS]` (section 10.7).
+- `planned <host> --by WHO [--for 30m] [--note TEXT]`, or `planned <host> --clear`.
+- `approver deny|tty` (section 10.5); `approver ssh` is not built.
+- `pins add` is not built: the lines `tailnet-unlock pins` prints on the box are the
+  `[hosts.<name>.door]` table as they are.
 
 ## 13. Installing
 
@@ -1283,19 +1381,22 @@ initramfs/        POSIX sh: door, supervise, unseal, lib.sh, paths.sh (fixed pat
                   init-premount, init-bottom, panic, zfs-load-key, post-update, conf-umask
 src/tailnet_unlock/
                   config, render, authorized_keys, doorkey, tpm, container, seal, cli;
-                  keyholder/: pins (the role from the verified key), approval (the contract),
-                  keymaterial, doorstatus. Planned: predict, enroll, door_client, deliver,
-                  approvers/, watch, audit
+                  keyholder/: config, pins (the role from the verified key), approval (the
+                  contract), keymaterial, doorstatus, peers (the tailnet's view), deliver and
+                  watch (the decisions, over an edge of effects); door (OpenSSH's client), run
+                  (one program, bounded), state, approvers and cli (the effects).
+                  Planned: predict
 tools/            install-tree (puts the files where the package will), build-deb (the
-                  reproducible .deb), check_ignores.py
+                  reproducible .deb), build_pyz.py (the keyholder's single file), check_ignores.py
 tests/unit/       pytest: the pure functions, the harness's command lines
 tests/shell/      the door, the panic script and the load-key extension under dash and busybox
 tests/tpm/        door-keygen, seal and unseal against swtpm; the supervisor with dropbear
+tests/delivery/   deliveries end to end: the commands, OpenSSH's client, dropbear and the door
 tests/initramfs/  real images from mkinitramfs, the degraded builds, the door run from an image
 tests/vm/         the harness, one TCG boot, the KVM scenarios and the guest's provisioning
 tests/package/    the .deb installed, upgraded, removed and purged with apt in the test container
 tests/container/  the Debian 13 test image (packages from Debian itself)
-examples/         box.toml, policy.hujson; planned: keyholder.toml, approver scripts
+examples/         box.toml, keyholder.toml, policy.hujson, approver.py
 packaging/        the .deb's control file, maintainer scripts, triggers and conffiles
 ```
 
@@ -1309,7 +1410,7 @@ unit` is what CI's check job runs.
 | Run | Trigger | What | Where |
 |---|---|---|---|
 | Local | every commit | `make test`: in the Debian 13 test container, `shellcheck --shell=sh`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, the unit and shell tests, swtpm and dropbear, real images, one TCG boot; `make vm-test` for the KVM scenarios | the developer's machine with docker; a Debian host with KVM for the VM scenarios |
-| Check | every push and pull request | **one job**: `shellcheck --shell=sh` on `initramfs/`, `tools/` and `packaging/`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, the unit tests (busybox-sh tests included) on the newest stable Python, and two builds of the `.deb` that must be byte-equal | GitHub-hosted runner |
+| Check | every push and pull request | **one job**: `shellcheck --shell=sh` on `initramfs/`, `tools/` and `packaging/`, `mypy --strict --python-version 3.13`, `ruff` (target `py313`), the ignore-with-reason check, the unit tests (busybox-sh tests included) on the newest stable Python, and two builds each of the `.deb` and of the zipapp that must be byte-equal | GitHub-hosted runner |
 | Weekly | a schedule, once a week | the full matrix: unit tests on Python 3.13 through the newest stable; the container tiers of `make test` on Debian 13 and 14; the package's install, upgrade, removal guard and purge on Debian 13 and 14 (`make deb`, part of `make test`); the VM scenarios on Debian 13 and 14 against headscale; plus the next Python pre-release, allowed to fail | GitHub-hosted runners (Linux runners expose `/dev/kvm`) |
 | Release | a version tag | the full matrix and the VM scenarios on every supported Debian release (13 and 14), all required, plus the VM scenarios against a throwaway Tailscale tailnet (an OAuth client in the repository's secrets, scoped to auth keys for a test tag); then the release assets are built | GitHub-hosted runners |
 | Hardware | before each release, by hand | the scenarios that need real hardware on one machine with a discrete TPM and one with a firmware TPM; results in the release notes | the maintainer's machines |
@@ -1374,7 +1475,7 @@ forks. Debian 14 runs use initramfs-tools until the dracut module exists.
 | # | Scenario | Passes when |
 |---|---|---|
 | T1 | Boot, unlock by hand through the door (first over the uplink, then over the tailnet) | the root mounts; the unlock node goes offline before the box's own node comes up |
-| T2 | Boot, the watcher finds it, the SSH approver approves | delivered; the audit line is complete, `by` names the key that logged in |
+| T2 | Boot, the watcher finds it, the approver approves | delivered; the audit line is complete, `by` names who approved (with the SSH approver, once built, the key that logged in) |
 | T3 | Approver refuses; approver times out | nothing is sent; the box keeps waiting; the console still works |
 | T4 | Control plane unreachable | the uplink door unlocks |
 | T5 | The disk image copied to a second VM with its own swtpm | no unlock node connects; the sealed key is not presented; only the recovery door answers, on the uplink only; `deliver` refuses it |
@@ -1385,7 +1486,7 @@ forks. Debian 14 runs use initramfs-tools until the dracut module exists.
 | T10 | Kernel update and reboot (`measured`) | the predicted branch unseals; a forced misprediction falls through as section 9 says, never a hang |
 | T11 | Tailscale package upgrade | every initramfs rebuilt by the trigger; `verify` reads the floor in each |
 | T12 | An approval for boot A replayed on boot B | refused (boot id) |
-| T13 | Unlock node online while the box runs | `on_alarm = "alert"`: the hook runs once; `"expire"`: the node's key is expired, the node is kept |
+| T13 | Unlock node online while the box runs | `on_alarm = "alert"`: the hook runs once (`"expire"` is not built) |
 | T14 | Every log, console capture, audit file and CI log | the key bytes appear nowhere |
 | T15 | `tailnet.enabled = false` | no Tailscale in any image; the uplink door alone |
 | T16 | Rehearsal and commit on a box with a local key | a failed delivery still boots with the local key; `commit` refuses until a door unlock happened |
@@ -1406,9 +1507,9 @@ forks. Debian 14 runs use initramfs-tools until the dracut module exists.
 
 The work goes in the order of the table. Release 0.1.0 is the box side, for Debian 13 with ZFS and the
 `tpm` profile: rows 2 and 3 and the 0.1.0 part of row 5 (`enroll`, `verify`, `status`, `disable
---tailnet`, the trigger, the removal guard and the one `.deb`). Delivery (row 4), the rest of row 5 and
-rows 6 to 8 follow it; until delivery exists, a person or a script unlocks through the door with plain
-`ssh` (`status`, then `unlock <boot_id>` with the key on stdin). "Passes when" names the scenarios of
+--tailnet`, the trigger, the removal guard and the one `.deb`). Release 0.2.0 adds delivery (row 4). The
+rest of row 5 and rows 6 to 8 follow. A person or a script can always unlock through the door with
+plain `ssh` (`status`, then `unlock <boot_id>` with the key on stdin). "Passes when" names the scenarios of
 section 15.3 that must pass for the row to count as done.
 
 | Order | Feature | State | Passes when |
@@ -1416,8 +1517,8 @@ section 15.3 that must pass for the row to count as done.
 | 1 | The design | Written (this document). | n/a |
 | 2 | The uplink door: a minimal `door-keygen` and `seal` (`tpm` profile, `generate` and `import`), the `door.tpm` container, the initramfs-tools hook and scripts, the door command and its grammar, the ZFS load-key extension, the recovery door, the panic cleanup, the console path, a person unlocking by hand (the keyholder `unlock` command is planned; plain `ssh` to the door works today); the VM harness with QEMU, OVMF, swtpm and the serial console (no headscale yet) | Built and tested in the Debian 13 test container, and the KVM scenarios pass in CI (since 2026-11-22). | T1 (uplink), T3 (by hand), T5 (uplink part), T6, T7, T14, T21, T16 (the local key fallback), T22, T26 (dropbear), T27, T28 |
 | 3 | The tailnet door: enrollment, tailscaled in the initramfs, headscale in the harness, the policy example and its tests | Built for 0.1.0: `enroll`, `verify`, `status`, `disable --tailnet`, and `tailscaled` in the initramfs with the same flags as `enroll`. The container tests run them against fake daemons and the real tailscaled without a TPM; a real `--encrypt-state` join is the tailnet VM tier's (section 15.2). | T1, T4, T5, T6, T15, T19, T20, T26 (tailscaled) |
-| 4 | Delivery: `deliver`, the approver contract, `tty` and `ssh` approvers, key sources, boot binding, the recovery gate, the role from the verified key, audit, `watch`, `on_alarm` | Not built, apart from the pure code for pins, the approval contract, the door's status line and the key material, with unit tests. | T2, T3, T12, T13, T14, T24, T25 |
-| 5 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; then the release run and the hardware smoke test | Built for 0.1.0: `enroll` (the unlock node), `verify`, `status`, `disable --tailnet`, the trigger, the degraded build (the hook), the removal guard and the one `.deb`. Not built: rehearsal, `commit`, `rotate`, `reseal`, `enroll --rekey`, `enroll --import-dropbear-initramfs`, `disable --local-key` and `--console`, the keyholder package and the zipapp. | For 0.1.0: T11, T15, T17 (the removal guard), T18. Then T1 to T22 and T24 to T28 (`tpm`), on headscale and on a Tailscale tailnet |
+| 4 | Delivery: `deliver`, the approver contract, the `tty` approver, key sources, boot binding, the recovery gate, the role from the verified key, audit, `watch`, `unlock`, the zipapp; then the `ssh` approver and `on_alarm = "expire"` | Built, apart from the `ssh` approver, `pins add` and `on_alarm = "expire"`. The delivery tier of the container tests runs the commands against dropbear and the door's own script; the scenarios against a real boot are in the tailnet VM tier. | T2, T3, T12, T13, T14, T24, T25 |
+| 5 | Lifecycle and packaging: `enroll`, rehearsal, `commit`, `rotate`, `disable`, `verify`, the trigger, the degraded build, the removal guard, the `.deb` packages, the zipapp; then the release run and the hardware smoke test | Built for 0.1.0: `enroll` (the unlock node), `verify`, `status`, `disable --tailnet`, the trigger, the degraded build (the hook), the removal guard and the one `.deb`. Not built: rehearsal, `commit`, `rotate`, `reseal`, `enroll --rekey`, `enroll --import-dropbear-initramfs`, `disable --local-key` and `--console`, and a keyholder package of its own. | For 0.1.0: T11, T15, T17 (the removal guard), T18. Then T1 to T22 and T24 to T28 (`tpm`), on headscale and on a Tailscale tailnet |
 | 6 | The dracut module, for Debian 14 | Not built. | T23 (dracut) |
 | 7 | The `measured` profile (systemd-boot and UKI) | Not built. | T8, T9, T10, with Secure Boot on and off |
 | 8 | The LUKS backend | Not built. | T23 (LUKS) |
@@ -1439,6 +1540,14 @@ tests cover the door halves of T1, T5, T7, T21, T22, T26, T27 and T28. The KVM s
 CI since 2026-11-22; running them locally needs a host with `/dev/kvm`, QEMU, OVMF (`OVMF_CODE_4M.fd`,
 `OVMF_VARS_4M.fd`), swtpm, about 20 GB of disk for the cached images, and access to cloud.debian.org
 and deb.debian.org for the first build. T16's local-key half needs the rehearsal, which is not built.
+
+**Where delivery stands.** The decisions are unit-tested over a scripted edge. The delivery tier
+(`make delivery`, part of `make test`) runs the real commands, OpenSSH's client, dropbear and the door's
+own script in the test container: an approval, every way of not getting one, a boot that changed between
+the approval and the key, the recovery door refused and acknowledged, a door that lies about its key, a wrong
+key, the lock, a stop during the approval, the watcher with and without keys, the zipapp, and the search for
+the key in every file, log, argument and environment. T2, T3, T12, T13, T24 and T25 (the copy; the lying
+door is the delivery tier's) are in the tailnet VM tier, against headscale and a real boot.
 
 ## 17. Versions, read 2026-11-21
 
@@ -1488,12 +1597,12 @@ tools are pinned to the upstream versions above in pre-commit and CI.
 | D16 | Recovery door: `"uplink"` by default under `tpm`, `"off"` under `measured`, over the tailnet only when set; its key unsealed on `/boot`, said plainly | A cleared TPM must not strand a headless box with an uplink; under `measured` a recovery door would hand the key to a modified chain. |
 | D17 | The door on its own port, 2222 by default | Its host key never collides with the real sshd's in a known-hosts file. |
 | D18 | The hook never fails the build; each missing part degrades the image loudly (tailnet door, then sealed door, then any door), recorded and reported by `verify` | A kernel package's configure must not fail because of this project, and a degraded image must never go unnoticed. |
-| D19 | `.deb` packages plus a standard-library zipapp for keyholders | Debian boxes get dependencies and triggers; keyholders run anywhere Python runs. |
+| D19 | One `.deb` plus a standard-library zipapp for keyholders | Debian boxes get dependencies and triggers; keyholders run anywhere Python runs. |
 | D20 | QEMU, OVMF and swtpm with headscale for the VM scenarios; a throwaway Tailscale tailnet before releases | Reproducible without an account; the real control plane is still checked before anyone installs a release. |
 | D21 | The initramfs carries tailscaled only, not the CLI | Size: the 1.104.7 CLI is 34.3 MB (16.7 MB at zstd level 9) per image, about 50 MB on `/boot` with three kernels. Nothing in the boot flow needs it: tailscaled starts from its saved preferences, the door's `status` does not report connection state, and keyholders read the node's state from their side. Attack surface is not the reason: the CLI is not a daemon. |
 | D22 | Recommend a root key a person can type (`keyformat=passphrase`, at least 128 bits), backed up off the box | ZFS has one wrapping key per encryption root, so the console fallback types the same key; losing it loses the data. |
 | D23 | Door key source `generate` or `import`, both sealed the same way | Consumers that already keep host keys in their own secret store can pin them in advance; the default keeps the plaintext from ever leaving the box. |
-| D24 | `on_alarm` is `alert` or `expire`, default `alert` | Expiring stops a cloned identity but strands a box behind NAT at its next genuine reboot; the safe generic default alerts, a consumer that prefers expiry sets it. |
+| D24 | `on_alarm` is `alert`; `expire` is refused until it is built | Expiring stops a cloned identity but strands a box behind NAT at its next genuine reboot, and it needs an API credential with device write access, which the keyholder otherwise does without (D12). |
 | D25 | Automated delivery refuses the recovery door unless `allow_recovery_delivery = true` and the approver acknowledges the recovery role | The recovery key is on `/boot` in plain text; sending to it must be a separate, explicit human decision. |
 | D26 | Door material wiped on every exit path; no initramfs shell under `measured` (`tailnet-unlock.noshell` in the UKI command line, and our panic script wipes, then reboots and never returns); never `panic=` | A shell inside a genuine initramfs, after the unseal, would hand out the sealed key; under `measured` that is the attack the profile exists to stop. `panic=` would deny the shell too, but initramfs-tools 0.148.4 then reboots before any panic script runs, so nothing would wipe. |
 | D27 | Separate delivery keys (`restrict`) and operator keys (`no-port-forwarding,no-agent-forwarding,no-X11-forwarding`); the role set by the key line | People need a terminal for the no-echo prompt; automation needs nothing, so it gets nothing. |
@@ -1502,6 +1611,15 @@ tools are pinned to the upstream versions above in pre-commit and CI.
 | D30 | TPM 2.0 is a hard requirement; no mode without it | Without a TPM the door's identity is plain text on `/boot`, which is the problem this project exists to fix. |
 | D31 | The keyholder derives the door's role only from the host key its SSH client verified, one pin per known-hosts file; the recovery pin is used only with `allow_recovery_delivery = true` or `unlock --recovery` | A copy of `/boot` holds the recovery key unsealed and can report anything about itself, including "sealed". |
 | D32 | A supervisor in the initramfs owns both daemons: it starts them, restarts them with a backoff, and is the one place that stops them and wipes | A door that dies while the box waits would otherwise strand a headless box until someone reaches its console; one owner of the PIDs makes every exit path wipe the same way. |
+| D33 | `on_waiting` replaces the watcher's own delivery, runs on every pass while the box waits, and dedupes itself; `waiting_since` is kept by the watcher | A watcher may run where no key may be (a small shared machine) and hand the work to a job elsewhere; a hook told every pass recovers by itself from a lost event, and needs one number to tell a new reboot from an old one. |
+| D34 | The uplink door proves itself to a keyless watcher by a refused login after a verified host key, read as the whole of OpenSSH's stderr | A watcher that holds an SSH key the door accepts is one more place to steal it from; text a server chooses before its key is verified always stands behind OpenSSH's own words. |
+| D35 | Without `on_waiting`, the watcher starts `deliver` as a child and waits for it; after a delivery that did not unlock it waits `redeliver_minutes` | A detached process is killed with a timer's unit, or lost to it; the per-host lock already keeps two deliveries apart; a person who refused should not be asked again every minute. |
+| D36 | The alarm is told once per episode, then daily; it is confirmed by a second read inside the pass | An alarm every minute is one nobody reads; one read can catch an enrollment or a status that is seconds old. |
+| D37 | A name finds a node when no stable id is set | Consumers need not pin ids that change with every enrollment; the pinned host key is what authenticates the door either way. |
+| D38 | A failed host key check ends a delivery as `recovery-only` only after two minutes, and only for a door that proves the pinned recovery key | A transient TPM failure gets its retries; anybody on the path can fail the sealed check, and must not be able to end a delivery by it; the running system may have some other server on the port. |
+| D39 | `--idle-minutes` for a delivery started before its reboot | A delivery started by whatever plans reboots must end by itself, with nobody asked, when the reboot does not happen. |
+| D40 | A host without a TPM is pinned by its recovery key alone and delivered to only with `allow_recovery_delivery` and an acknowledged approval | It has no sealed door (D30 is about the box's identity); the approval carries the whole decision there, so it must say that it knows. |
+| D41 | A key or an unlock node id that two hosts share is a configuration error | Pasted twice, it would send one host's root key to the other host's door. |
 
 ## 19. Open questions and decisions
 
@@ -1514,7 +1632,7 @@ These settle questions the first draft left open. Most are also stated in the se
 | O1 | Who predicts PCRs under `measured` | Decided when the `measured` profile is built: systemd-pcrlock if it is no longer marked experimental, otherwise our own predictor for PCR 4 in the UKI path only. |
 | O2 | GRUB under `measured` | Not supported; GRUB users get `tpm`. Evil-maid resistance needs systemd-boot with a UKI (section 8.2). |
 | O3 | Recovery door default | `"uplink"` under `tpm`, `"off"` under `measured`, over the tailnet only when set (D16), automated delivery gated (D25). |
-| O4 | Expire on alarm | A setting, `on_alarm`, default `alert` (D24). |
+| O4 | Expire on alarm | Not built; `on_alarm` takes `alert` alone (D24). |
 | O5 | An approver that says yes by itself | Not shipped. |
 | O6 | Node state under the `measured` policy | No: Tailscale's own sealing stays; the boundary is written in section 6.2. |
 | O7 | Distribution | Release assets with checksums for 0.x; an apt repository later. |

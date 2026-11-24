@@ -14,9 +14,9 @@ you control.
 > the door on the machine's own address (the uplink), the door on your tailnet, `enroll`, `verify`,
 > `status`, `disable --tailnet`, and one `.deb` package. You unlock a box through the door with plain
 > `ssh`: `status` tells you the boot it is waiting in, and `unlock <boot id>` takes the key on stdin.
-> What it does not have yet: the keyholder program that delivers a key for you after an approval
-> (`deliver`, `watch`, approvers), the safe test reboot (`rehearsal` and `commit`), `rotate`, `reseal`,
-> dracut for Debian 14, the `measured` profile and LUKS. Those are described in the design and are
+> The main branch has the keyholder too, for the next release (0.2.0): `deliver` sends a key after an
+> approval, and `watch` notices a box that waits.
+> What it does not have yet: the safe test reboot (`rehearsal` and `commit`), `rotate`, `reseal`, dracut for Debian 14, the `measured` profile and LUKS. Those are described in the design and are
 > planned, not built. It has not yet been run on real hardware, and it has had no independent
 > security audit.
 > What is built and what is not is listed in the [table in section 16 of DESIGN.md](DESIGN.md#16-what-is-built-and-planned-and-in-what-order).
@@ -64,9 +64,7 @@ does not exist.
 **Who it is not for.** If the machine has no TPM 2.0, or a virtual one that travels with snapshots,
 it cannot work. If you want the box to boot by itself with no one deciding, use TPM auto-unlock
 (Clevis, `systemd-cryptenroll`) and accept what it gives up (see "How it compares"). If the box has a
-public address and you only need to type a passphrase over SSH, `dropbear-initramfs` is simpler. It is
-also not yet for anyone who wants the key delivered automatically: version 0.1.0 leaves that
-step to you and `ssh`.
+public address and you only need to type a passphrase over SSH, `dropbear-initramfs` is simpler.
 
 ## The usual answers, and what they give up
 
@@ -179,6 +177,48 @@ send a key. The door replies with one line of JSON: `loaded`, `wrong-key` (try a
 or `boot-mismatch`. Send the key only to the sealed door, or to the recovery door when you know why
 the box is in recovery (below).
 
+### Delivering the key after an approval
+
+Not in 0.1.0; on the main branch, for 0.2.0. The machine that holds your root keys, the
+**keyholder**, runs `tailnet-unlock deliver`: it waits for the box's door, checks the door's pinned
+key, asks your **approver**, checks that the same boot still waits, and pipes the key in.
+
+1. Get the program. On Debian it is in the package, next to the box's commands, and needs
+   `openssh-client`. Anywhere else, use `tailnet-unlock-keyholder.pyz` from a release (or
+   `make pyz`): one file, Python 3.13 or later, nothing to install. The machine's own `tailscale`
+   tells it where the door is, if you use the tailnet door. Your policy must let it reach the door's
+   port, and give it at least one grant to the box's own node, or it cannot see that the box is up.
+2. Make a key for it with `ssh-keygen -t ed25519` (without a passphrase, for automation) and add the
+   public half to `/etc/tailnet-unlock/delivery_keys` on the box. That key can ask the door for its
+   status and hand it a root key, nothing else. Rebuild the box's images.
+3. Copy [`examples/keyholder.toml`](examples/keyholder.toml) to `/etc/tailnet-unlock/keyholder.toml`.
+   Paste what `tailnet-unlock pins` prints on the box under `[hosts.<name>.door]`, and set
+   `key_command` to whatever prints that box's root key.
+4. Set `approver` to a program of yours. It gets the request as JSON on stdin (which box, which door,
+   which boot, whether the reboot was planned, where the door seems to be) and prints a decision;
+   [`examples/approver.py`](examples/approver.py) is a complete one to adapt. No answer, a wrong
+   answer or a late one sends nothing. There is no built-in approver that says yes, and none yet that
+   asks over SSH.
+
+```
+tailnet-unlock deliver web-1 --reason manual --by alice
+tailnet-unlock unlock web-1             # by hand: asks at this terminal, takes a typed key
+tailnet-unlock planned web-1 --by alice --for 30m && ssh web-1 systemctl reboot
+tailnet-unlock watch                    # one pass, for a timer; --every 60 to keep going
+```
+
+`watch` starts a delivery for a box it finds waiting, or runs your `on_waiting` program instead. A
+machine that runs only `watch` with that setting needs no SSH key and no root key. It also raises an
+alarm when a door's tailnet node is online while its box runs, which should not happen.
+
+`deliver` ends with an exit code that says what happened (0 delivered, 3 refused, 4 no answer in
+time, 5 no door, 6 wrong key, 7 not needed, 8 only the recovery door, 9 another delivery runs, 10
+failed) and one line of JSON in `audit.jsonl`. Sections 10 and 12.4 of [DESIGN.md](DESIGN.md) have
+every option, the two JSON formats and the event `watch` sends.
+
+**Protect the keyholder.** Whoever has root there has your keys: the approval is enforced on that
+machine.
+
 ## Run the checks
 
 Install `shellcheck` and `dash` (or `busybox`) with your package manager, then, from a checkout:
@@ -193,7 +233,7 @@ PATH=$PWD/.venv/bin:$PATH make check
 
 `make check` runs `shellcheck`, `mypy`, `ruff` and the unit and shell tests, and ends with a line
 like `... passed in ...s` and no failures. With Docker, `make test` builds a Debian 13 test image and
-also runs the TPM tests against swtpm (a software TPM), real `mkinitramfs` images, the package's
+also runs the TPM tests against swtpm (a software TPM), deliveries through a real SSH server, real `mkinitramfs` images, the package's
 install, upgrade, removal and purge with apt, and one real boot under QEMU. Nothing touches the TPM,
 the disks or the boot of the machine you run it on. The virtual-machine scenarios that boot a ZFS root
 (`make vm-test`) need a host with KVM; CI runs them weekly and before every release.
@@ -268,8 +308,7 @@ These are the ways back in, in the order to try them.
 4. **The key stays with you.** It lives on a **keyholder**: your laptop, a CI job, a small server at
    home. You can type it in, or let the keyholder deliver it after an **approver** says yes. You decide
    what an approval is: a touch of your security key over SSH, a button in your own system, anything
-   that can run a program. The rules for an approval are written and tested as code; the commands
-   that use them are not built, so in 0.1.0 you type or pipe the key through `ssh` yourself.
+   that can run a program. Built for 0.2.0; in 0.1.0 you type or pipe the key through `ssh` yourself.
 5. **The door closes before the system starts.** The tailnet node goes offline, the door's keys are
    deleted from early boot's temporary storage, and your system's own Tailscale node comes up as
    usual. Built.
@@ -283,8 +322,8 @@ present your box's SSH host key. The next time something sends the key, it may s
 With the identity sealed, the copy holds only ciphertext that your machine's TPM alone can open, so it
 can neither join the tailnet nor present the sealed host key your keyholder expects. The keyholder is
 designed to send the key only to a door that presents that sealed key, with one exception that stays
-yours to make: the recovery door below, which you unlock by hand over SSH (the keyholder's
-`unlock --recovery` is planned), or automatically only if you turn that on and your approver confirms it.
+yours to make: the recovery door below, which you unlock by hand (`unlock --recovery`, or plain
+`ssh`), or automatically only if you turn that on and your approver confirms it.
 
 Because the TPM holds only the door, never the disk key, losing the TPM loses the door and nothing
 else. Your data is still yours: you unlock once, at the console or through the recovery door where you
@@ -324,17 +363,17 @@ Each item says whether it exists in the repository today.
 - The Debian package, with the trigger that rebuilds images when Tailscale changes and the guard that
   refuses removal while the box depends on it: built, one `.deb` on each release.
 - A keyholder: `unlock` for you at a terminal, `deliver` for automation, `watch` to notice a box
-  waiting at its door after a reboot nobody planned. Not built; the door's side of delivery is, and
-  plain `ssh` does the same job by hand.
-- A small, documented approver contract (JSON in, JSON out): the contract is built as code and
-  tests. The complete approver that needs nothing but SSH is not built.
+  waiting at its door after a reboot nobody planned: built, for 0.2.0. Plain `ssh` does the same job
+  by hand.
+- A small, documented approver contract (JSON in, JSON out): built, with one approver for a terminal
+  and an example to adapt. The complete approver that needs nothing but SSH is still to come.
 - An example tailnet policy, with tests, where the door can reach nothing and only your keyholders and
   operators can reach the door: `examples/policy.hujson`, which the VM tests load. Section 7.5 of the
   design explains it.
 - Fallbacks: the box's own address when the tailnet is down, the recovery door after a TPM clear
   where you enabled it and can reach it, and the console. For a box behind NAT whose TPM failed, the
   console is the only way back. The uplink door, the recovery door and the console prompt are built.
-- A single-file keyholder for machines that are not Debian. Not built.
+- A single-file keyholder for machines that are not Debian: built, for 0.2.0.
 
 The container tests and a real boot under QEMU TCG run on every release. The virtual-machine scenarios
 that boot a real ZFS root pass in CI (since 2026-11-22). Nothing has yet run on real hardware.
@@ -373,9 +412,9 @@ they were fixed, are recorded in section 19 of [DESIGN.md](DESIGN.md).
 
 ## Requirements
 
-See "What you need" above. A keyholder, once it is built, needs only Python 3.13 or later and an SSH
-client, and a place to keep the key (a password manager, SOPS, a file on an encrypted disk: anything
-that prints it on request). Today that is you with `ssh`.
+See "What you need" above. A keyholder needs only Python 3.13 or later and an OpenSSH client, and a
+place to keep the key (a password manager, SOPS, a file on an encrypted disk: anything that prints it on
+request).
 
 ## Back up the root key
 
@@ -407,8 +446,8 @@ the console.
 **Does the key go through Tailscale's servers?** No. The tailnet carries an SSH connection, encrypted
 end to end between your keyholder and the door. The coordination server sees that two nodes talked.
 
-**Can it unlock without me?** Only if the approver you configure says yes. The project will ship
-approvers that ask a person. If you want unattended unlocks for planned reboots, you write that rule
+**Can it unlock without me?** Only if the approver you configure says yes. The project ships
+an approver that asks a person at a terminal. If you want unattended unlocks for planned reboots, you write that rule
 yourself, against a small contract, and you own the risk.
 
 **Does it work with headscale?** It is designed to. The test plan is to run its virtual machine
@@ -450,8 +489,7 @@ the key never lives on the machine and every unlock is a decision.
 
 ## Roadmap
 
-After 0.1.0 the order is: delivery and approvals (the keyholder, `deliver`, `watch`), then the
-rehearsal, `commit` and the other lifecycle commands, then dracut for Debian 14, the `measured`
+After 0.1.0 the order is: delivery and approvals (the keyholder, built for 0.2.0), then the rehearsal, `commit` and the other lifecycle commands, then dracut for Debian 14, the `measured`
 profile, and LUKS. The design, the test plan and the table of what is built are in
 [DESIGN.md](DESIGN.md), and every release's changes are in [CHANGELOG.md](CHANGELOG.md).
 
