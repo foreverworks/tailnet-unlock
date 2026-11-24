@@ -2,7 +2,9 @@
 # Inside the test container (or any Debian 13 host with the same packages) the tiers run alone:
 #   make lint unit          what CI's check job runs, on any machine with dash and busybox
 #   make tpm initramfs      swtpm, dropbear and mkinitramfs; the test container only
+#   make delivery           deliveries end to end with dropbear and OpenSSH; the test container only
 #   make deb                build the .deb and install, upgrade, remove and purge it; the test container only
+#   make pyz                build the keyholder's single file into dist/, on any machine
 #   make tcg                one real boot of the image under QEMU TCG with swtpm (about 1 minute)
 #   make vm-test            the uplink VM scenarios on a host with KVM, QEMU, OVMF and swtpm
 #   make vm-tailnet-test    the tailnet VM scenarios: the same host plus openssl and 10.0.2.2 on lo
@@ -18,7 +20,7 @@ SHELL_SCRIPTS = initramfs/door initramfs/supervise initramfs/unseal initramfs/li
 	tools/build-deb packaging/postinst packaging/prerm packaging/postrm
 PYTEST = $(PYTHON) -m pytest -p no:cacheprovider
 
-.PHONY: test lint unit tpm initramfs deb tcg vm-test vm-tailnet-test image check
+.PHONY: test lint unit tpm delivery initramfs deb pyz tcg vm-test vm-tailnet-test image check
 
 check: lint unit
 
@@ -35,11 +37,18 @@ unit:
 tpm:
 	TU_TEST_CONTAINER=1 $(PYTEST) tests/tpm
 
+delivery:
+	TU_TEST_CONTAINER=1 $(PYTEST) tests/delivery
+
 initramfs:
 	TU_TEST_CONTAINER=1 $(PYTEST) tests/initramfs
 
 deb:
 	TU_TEST_CONTAINER=1 $(PYTEST) tests/package
+
+# the keyholder's single file, for machines that are not Debian
+pyz:
+	$(PYTHON) tools/build_pyz.py dist
 
 tcg:
 	TU_TEST_CONTAINER=1 TU_TCG=1 $(PYTEST) tests/vm/test_tcg_smoke.py
@@ -54,6 +63,6 @@ image:
 	$(DOCKER) build -q $(BUILD_ARGS) -t $(IMAGE) tests/container >/dev/null
 
 test: image
-	$(RUN) $(IMAGE) make lint unit tpm
+	$(RUN) $(IMAGE) make lint unit tpm delivery
 	$(RUN) $(IMAGE) make deb
 	$(RUN) --privileged $(IMAGE) make initramfs tcg

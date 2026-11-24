@@ -25,7 +25,7 @@ RUN sed -i 's/^Components: main$/Components: main contrib/' /etc/apt/sources.lis
       dropbear-bin \
       tpm2-tools libtss2-tcti-swtpm0t64 libtss2-tcti-device0t64 swtpm swtpm-tools \
       zfs-initramfs zfsutils-linux \
-      openssh-client \
+      openssh-client openssh-server \
       python3 python3-venv \
       qemu-system-x86 qemu-utils ovmf \
  && rm -rf /var/lib/apt/lists/*
