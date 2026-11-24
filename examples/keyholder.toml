@@ -1,0 +1,36 @@
+# /etc/tailnet-unlock/keyholder.toml on the machine that holds the root keys. DESIGN.md section
+# 12.4 explains every key; the values shown for the optional ones are their defaults.
+
+[defaults]
+ssh_key = "/etc/tailnet-unlock/keyholder/id_ed25519"   # its public half is in the box's delivery_keys
+approver = ["/usr/local/lib/tailnet-unlock/approver", "https://approvals.example.com/requests"]
+# approval_timeout_seconds = 900
+# door_wait_minutes = 30
+# node_wait_seconds = 300            # after the key is loaded: how long the box may take to come online
+# allow_recovery_delivery = false    # true: ask about the recovery door too, see section 9
+# tailscale = ["tailscale"]          # or ["tailscale", "--socket=/run/user/1000/tailscaled.sock"]
+# ssh_proxy_command = "tailscale nc %h %p"   # a keyholder whose tailscaled runs in userspace networking
+
+# `watch`: with on_waiting set, the hook runs on each pass while a box waits (one JSON event on
+# stdin, told again on every pass) and no delivery is started here.
+# on_waiting = ["/usr/local/lib/tailnet-unlock/start-delivery-job"]
+# redeliver_minutes = 30             # without on_waiting: how soon a delivery is tried again
+alarm = ["logger", "-t", "tailnet-unlock", "the unlock node is online while the box runs"]
+# on_alarm = "alert"                 # the only value built
+# alarm_after_seconds = 60
+# alarm_repeat_hours = 24
+# hook_timeout_seconds = 60
+
+[hosts.web-1]
+node = "web-1"                       # the box's own tailnet node (node_id also works)
+key_command = ["pass", "show", "unlock/web-1"]
+expected_endpoints = ["198.51.100.0/24"]
+# Every key of [defaults] but tailscale may be set again here, for this host alone.
+
+[hosts.web-1.door]                   # paste what `tailnet-unlock pins` prints on the box
+port = 2222
+door_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINBKsjJ0K7SrOhNovUYV5ObQIkq3GgFrr4UgozLJd4c3"
+recovery_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKCapfR6Z1mAL/lV+NwtKhSlyZ0jvpf4ZBJ/+Tg0VaTw"
+unlock_node_id = "nEXAMPLE1CNTRL"    # or unlock_node = "web-1-unlock"
+uplink = "192.0.2.10"
+# uplink_port = 2222                 # when a router forwards another port to the door
