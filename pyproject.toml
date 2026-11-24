@@ -1,6 +1,6 @@
 [project]
 name = "tailnet-unlock"
-version = "0.1.0"
+version = "0.2.0"
 description = "Unlock an encrypted Debian root from anywhere on a tailnet, with the door's identity sealed to the TPM"
 readme = "README.md"
 license = "MIT"

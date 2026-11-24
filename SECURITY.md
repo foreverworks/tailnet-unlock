@@ -15,10 +15,10 @@ release notes in [CHANGELOG.md](CHANGELOG.md) say so when it does.
 
 ## State of the software
 
-tailnet-unlock 0.1.0 is early software. It covers the box side: the door on the machine's own address
+tailnet-unlock 0.2.0 is early software. It covers the box side: the door on the machine's own address
 and on a tailnet, the sealing of the door's key to the TPM, the initramfs hook and boot scripts,
-`enroll`, `verify`, `status`, `disable --tailnet` and the Debian package. Delivery of the key by a
-keyholder after an approval, the safe test reboot, `rotate` and the other lifecycle commands are not
+`enroll`, `verify`, `status`, `disable --tailnet` and the Debian package, and the delivery of the key by a
+keyholder after an approval. The safe test reboot, `rotate` and the other lifecycle commands are not
 built (see [README.md](README.md) and section 16 of [DESIGN.md](DESIGN.md)). It is tested in a Debian 13
 container, under QEMU and in virtual machines in CI, and has not yet run on real hardware. It has had
 no independent security audit. Do not rely on it to protect, or to keep you able to reach, a machine

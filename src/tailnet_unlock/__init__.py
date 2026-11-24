@@ -1,3 +1,3 @@
 """tailnet-unlock: unlock an encrypted root over a tailnet, its door sealed to the TPM."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

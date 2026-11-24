@@ -1,10 +1,10 @@
 # tailnet-unlock: design
 
-Status: version 0.1.0, the box side, is built. The uplink door, the sealing of its key to the TPM, the
+Status: version 0.2.0, the box side and the delivery of its key, is built. The uplink door, the sealing of its key to the TPM, the
 initramfs hook and boot scripts, the tailnet door with `enroll`, `verify`, `status` and `disable
 --tailnet`, and the Debian package are tested in a Debian 13 container (including one real boot under
-QEMU TCG), and the virtual machine scenarios pass in CI. Delivery, the keyholder commands, the safe
-test reboot, `rotate`, the dracut module, the `measured` profile and the LUKS backend are not built. Section 16 lists each
+QEMU TCG), and the virtual machine scenarios pass in CI, the keyholder's `deliver`, `unlock` and `watch`
+among them. The `ssh` approver, the safe test reboot, `rotate`, the dracut module, the `measured` profile and the LUKS backend are not built. Section 16 lists each
 feature with its state; section 17 holds the versions the design was written against (read on
 2026-11-21), and section 19 holds the settled decisions, the hazards the design closes and the
 questions still open.
@@ -1510,7 +1510,7 @@ forks. Debian 14 runs use initramfs-tools until the dracut module exists.
 
 The work goes in the order of the table. Release 0.1.0 is the box side, for Debian 13 with ZFS and the
 `tpm` profile: rows 2 and 3 and the 0.1.0 part of row 5 (`enroll`, `verify`, `status`, `disable
---tailnet`, the trigger, the removal guard and the one `.deb`). Release 0.2.0 adds delivery (row 4). The
+--tailnet`, the trigger, the removal guard and the one `.deb`). Release 0.2.0 is delivery (row 4). The
 rest of row 5 and rows 6 to 8 follow. A person or a script can always unlock through the door with
 plain `ssh` (`status`, then `unlock <boot_id>` with the key on stdin). "Passes when" names the scenarios of
 section 15.3 that must pass for the row to count as done.

@@ -3,7 +3,7 @@
 All notable changes are listed here, newest first. The versions follow [semantic
 versioning](https://semver.org); until 1.0, a minor release may change behaviour.
 
-## Unreleased: 0.2.0
+## 0.2.0
 
 ### Added
 
@@ -19,6 +19,8 @@ versioning](https://semver.org); until 1.0, a minor release may change behaviour
   announces a reboot.
 - `approver deny` and `approver tty`, `examples/keyholder.toml` and `examples/approver.py`.
 - `tailnet-unlock-keyholder.pyz`, the keyholder as one reproducible file for machines that are not Debian.
+- After an approval `deliver` reads the path again as well as the boot: a door that now answers from a site
+  your configuration contradicts gets nothing.
 - `make delivery`: deliveries end to end with dropbear and OpenSSH, in the test container.
 
 ### Not in this release

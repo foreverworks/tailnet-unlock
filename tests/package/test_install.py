@@ -13,6 +13,7 @@ import os
 import shutil
 import stat
 import subprocess
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -29,6 +30,9 @@ pytestmark = [
 ]
 
 EPOCH = "1700000000"
+with (REPO / "pyproject.toml").open("rb") as _project:
+    VERSION = str(tomllib.load(_project)["project"]["version"])
+NEXT = f"{VERSION}.1"
 CONFIG = Path("/etc/tailnet-unlock")
 STATE = Path("/var/lib/tailnet-unlock")
 DOOR = STATE / "door" / "door.tpm"
@@ -138,7 +142,7 @@ def scrub() -> None:
 def debs(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
     out = tmp_path_factory.mktemp("debs")
     built: dict[str, Path] = {}
-    for version in ("0.1.0", "0.1.1"):
+    for version in (VERSION, NEXT):
         done = sh(str(REPO / "tools" / "build-deb"), version, str(out))
         assert done.returncode == 0, done.stderr
         built[version] = Path(done.stdout.strip())
@@ -166,7 +170,7 @@ def enroll_on_disk() -> None:
 
 
 def test_install_puts_the_files_where_the_design_says(debs: dict[str, Path]) -> None:
-    done = apt_install(debs["0.1.0"])
+    done = apt_install(debs[VERSION])
     assert done.returncode == 0, done.stderr
     assert installed()
     for path, mode in FILES.items():
@@ -178,7 +182,7 @@ def test_install_puts_the_files_where_the_design_says(debs: dict[str, Path]) -> 
     assert not STATE.exists()
     code = "import tailnet_unlock; print(tailnet_unlock.__version__)"
     version = sh("/usr/bin/python3", "-I", "-c", code)
-    assert version.stdout.strip() == "0.1.0", version.stderr
+    assert version.stdout.strip() == VERSION, version.stderr
     assert sh("dpkg", "--verify", "tailnet-unlock").stdout == ""
     # the conffiles are the two under /etc, so an edit or a removal by hand survives an upgrade
     status = sh("dpkg-query", "-W", "-f=${Conffiles}", "tailnet-unlock").stdout
@@ -188,7 +192,7 @@ def test_install_puts_the_files_where_the_design_says(debs: dict[str, Path]) -> 
 
 def test_a_box_that_is_not_set_up_is_left_alone(debs: dict[str, Path]) -> None:
     set_update_initramfs(0)
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     assert calls() == []
 
 
@@ -196,7 +200,7 @@ def test_configure_rebuilds_the_images_on_a_set_up_box(debs: dict[str, Path]) ->
     set_update_initramfs(0)
     CONFIG.mkdir(parents=True)
     (CONFIG / "box.toml").write_text('[network]\ninterface = "eth0"\n', encoding="utf-8")
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     assert calls() == ["-u -k all"]
 
 
@@ -224,7 +228,7 @@ def test_the_trigger_rebuilds_images_when_tailscaled_changes(
 ) -> None:
     set_update_initramfs(0)
     enroll_on_disk()
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     CALLS.unlink()
     up = sh("dpkg", "-i", str(fake_tailscale("9.0.0", tmp_path)))
     assert up.returncode == 0, up.stderr
@@ -235,7 +239,7 @@ def test_the_trigger_does_nothing_before_the_box_is_set_up(
     debs: dict[str, Path], tmp_path: Path
 ) -> None:
     set_update_initramfs(0)
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     up = sh("dpkg", "-i", str(fake_tailscale("9.0.1", tmp_path)))
     assert up.returncode == 0, up.stderr
     assert calls() == []
@@ -244,7 +248,7 @@ def test_the_trigger_does_nothing_before_the_box_is_set_up(
 def test_a_failing_rebuild_never_fails_the_package(debs: dict[str, Path], tmp_path: Path) -> None:
     set_update_initramfs(1)
     enroll_on_disk()
-    configured = apt_install(debs["0.1.0"])
+    configured = apt_install(debs[VERSION])
     assert configured.returncode == 0, configured.stderr
     assert "W: tailnet-unlock:" in configured.stdout + configured.stderr
     assert installed()
@@ -258,7 +262,7 @@ def test_a_failing_rebuild_never_fails_the_package(debs: dict[str, Path], tmp_pa
 
 
 def test_removal_is_refused_while_the_box_is_enrolled(debs: dict[str, Path]) -> None:
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     enroll_on_disk()
     for action in ("--remove", "--purge"):
         done = sh("dpkg", action, "tailnet-unlock", fake_zfs=True)
@@ -270,7 +274,7 @@ def test_removal_is_refused_while_the_box_is_enrolled(debs: dict[str, Path]) -> 
 
 
 def test_removal_is_refused_when_only_the_recovery_door_exists(debs: dict[str, Path]) -> None:
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     enroll_on_disk()
     shutil.rmtree(DOOR)
     (DOOR.parent / "recovery_host_key").write_bytes(b"x")
@@ -282,7 +286,7 @@ def test_removal_is_refused_when_only_the_recovery_door_exists(debs: dict[str, P
 def test_the_command_ignores_modules_in_the_current_directory(
     debs: dict[str, Path], tmp_path: Path
 ) -> None:
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     (tmp_path / "tailnet_unlock").mkdir()
     (tmp_path / "tailnet_unlock" / "__init__.py").write_text("")
     (tmp_path / "tailnet_unlock" / "__main__.py").write_text("print('planted')\n")
@@ -296,11 +300,11 @@ def test_the_command_ignores_modules_in_the_current_directory(
         env=dict(os.environ, PYTHONPATH=str(tmp_path)),
     )
     assert done.returncode == 0, done.stderr
-    assert done.stdout.strip() == "0.1.0"
+    assert done.stdout.strip() == VERSION
 
 
 def test_removal_is_refused_when_zfs_cannot_say(debs: dict[str, Path]) -> None:
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     enroll_on_disk()
     set_broken_zfs()
     done = sh("dpkg", "--remove", "tailnet-unlock", fake_zfs=True)
@@ -309,22 +313,22 @@ def test_removal_is_refused_when_zfs_cannot_say(debs: dict[str, Path]) -> None:
 
 
 def test_an_upgrade_is_never_refused(debs: dict[str, Path]) -> None:
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     enroll_on_disk()
-    done = apt_install(debs["0.1.1"], fake_zfs=True)
+    done = apt_install(debs[NEXT], fake_zfs=True)
     assert done.returncode == 0, done.stderr
     version = sh("dpkg-query", "-W", "-f=${Version}", "tailnet-unlock").stdout
-    assert version == "0.1.1"
+    assert version == NEXT
     assert DOOR.exists(), "an upgrade keeps the box's state"
 
 
 def test_removal_is_allowed_when_the_box_is_not_enrolled(debs: dict[str, Path]) -> None:
     # a root that does not ask at the prompt, a door that does not exist, and no zfs at all
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     DOOR.mkdir(parents=True)
     set_zfs(["none", "file:///etc/zfs/key"])
     assert sh("dpkg", "--remove", "tailnet-unlock", fake_zfs=True).returncode == 0
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     shutil.rmtree(STATE)
     set_zfs(["prompt"])
     assert sh("dpkg", "--remove", "tailnet-unlock", fake_zfs=True).returncode == 0
@@ -334,7 +338,7 @@ def test_removal_is_allowed_when_the_box_is_not_enrolled(debs: dict[str, Path]) 
 def test_removal_rebuilds_the_images_without_the_door(debs: dict[str, Path]) -> None:
     set_update_initramfs(0)
     enroll_on_disk()
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     set_zfs(["none"])
     CALLS.unlink()
     # the rebuild must see a system whose hook is gone, or the image would carry the door again
@@ -354,7 +358,7 @@ def test_removal_rebuilds_the_images_without_the_door(debs: dict[str, Path]) -> 
 def test_a_failing_rebuild_never_fails_the_removal(debs: dict[str, Path]) -> None:
     set_update_initramfs(1)
     enroll_on_disk()
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     set_zfs(["none"])
     done = sh("dpkg", "--remove", "tailnet-unlock", fake_zfs=True)
     assert done.returncode == 0, done.stderr
@@ -363,7 +367,7 @@ def test_a_failing_rebuild_never_fails_the_removal(debs: dict[str, Path]) -> Non
 
 
 def test_purge_removes_everything_of_ours(debs: dict[str, Path]) -> None:
-    assert apt_install(debs["0.1.0"]).returncode == 0
+    assert apt_install(debs[VERSION]).returncode == 0
     enroll_on_disk()
     (CONFIG / "delivery_keys").write_text("ssh-ed25519 AAAA test\n", encoding="utf-8")
     (STATE / "images").mkdir()

@@ -9,13 +9,12 @@ for its key after a reboot. The door's identity is sealed to the machine's TPM, 
 cannot pretend to be your box. The key comes from you, or from a machine you trust after an approval
 you control.
 
-> **Status: version 0.1.0, the box side only. Early software, not for a machine you cannot reach.**
+> **Status: version 0.2.0, the box side and the delivery of its key. Early software, not for a machine you cannot reach.**
 > This release sets up and checks the door on one Debian 13 machine with root on ZFS and a TPM:
 > the door on the machine's own address (the uplink), the door on your tailnet, `enroll`, `verify`,
-> `status`, `disable --tailnet`, and one `.deb` package. You unlock a box through the door with plain
-> `ssh`: `status` tells you the boot it is waiting in, and `unlock <boot id>` takes the key on stdin.
-> The main branch has the keyholder too, for the next release (0.2.0): `deliver` sends a key after an
-> approval, and `watch` notices a box that waits.
+> `status`, `disable --tailnet`, and one `.deb` package. The keyholder unlocks it from a machine you
+> trust: `deliver` sends the key after an approval, `unlock` sends it for you at a terminal, and `watch`
+> notices a box that waits. Plain `ssh` does the same by hand.
 > What it does not have yet: the safe test reboot (`rehearsal` and `commit`), `rotate`, `reseal`, dracut for Debian 14, the `measured` profile and LUKS. Those are described in the design and are
 > planned, not built. It has not yet been run on real hardware, and it has had no independent
 > security audit.
@@ -107,14 +106,14 @@ depends on:
 
 ```
 sha256sum --check --ignore-missing SHA256SUMS
-sudo apt install ./tailnet-unlock_0.1.0_all.deb
+sudo apt install ./tailnet-unlock_0.2.0_all.deb
 ```
 
 The checksum only tells you that the file is the one the release lists. Where you have the GitHub CLI,
 you can also check that GitHub built it from this repository's tagged source:
 
 ```
-gh attestation verify tailnet-unlock_0.1.0_all.deb --repo foreverworks/tailnet-unlock
+gh attestation verify tailnet-unlock_0.2.0_all.deb --repo foreverworks/tailnet-unlock
 ```
 
 Installing changes nothing about how the box boots until you configure it. On a box that already has
@@ -157,7 +156,7 @@ box that still boots the way it did.
 At this point the box has a door in its images, but if its root still has a key file, the root unlocks
 by itself as before and nobody asks the door anything. **To actually use the door** you move the root
 to a prompt: `zfs set keylocation=prompt <encryption root>`, then `update-initramfs -u -k all` and
-`tailnet-unlock verify`, which also says when an image still holds a key file. Version 0.1.0 does not do this for you, and does not have the rehearsal that
+`tailnet-unlock verify`, which also says when an image still holds a key file. Version 0.2.0 does not do this for you, and does not have the rehearsal that
 falls back to the old key if the door fails. So: keep the key file, and a copy of the key somewhere
 safe, until you have rebooted once and unlocked through the door yourself. If that goes wrong, the
 console prompt takes the same key.
@@ -179,7 +178,7 @@ the box is in recovery (below).
 
 ### Delivering the key after an approval
 
-Not in 0.1.0; on the main branch, for 0.2.0. The machine that holds your root keys, the
+Since 0.2.0. The machine that holds your root keys, the
 **keyholder**, runs `tailnet-unlock deliver`: it waits for the box's door, checks the door's pinned
 key, asks your **approver**, checks that the same boot still waits, and pipes the key in.
 
@@ -262,7 +261,7 @@ These are the ways back in, in the order to try them.
   anything about early boot: a provider's KVM or serial console, a rescue system, a person on site.
   The boot scripts are written so that when the door cannot start, the console prompt for the root
   key remains. On a box behind NAT whose TPM fails, the console is the only way.
-- **Never remove your old way of unlocking until a door unlock has worked.** Version 0.1.0 has no
+- **Never remove your old way of unlocking until a door unlock has worked.** Version 0.2.0 has no
   rehearsal reboot and no `commit` to enforce this: it is yours to do. Keep the root's key file, and
   a copy of the key elsewhere, until you have rebooted once and unlocked through the door yourself.
 - **Back out of the initramfs hook.** The hook only adds files to the initramfs. If a box fails to
@@ -308,7 +307,7 @@ These are the ways back in, in the order to try them.
 4. **The key stays with you.** It lives on a **keyholder**: your laptop, a CI job, a small server at
    home. You can type it in, or let the keyholder deliver it after an **approver** says yes. You decide
    what an approval is: a touch of your security key over SSH, a button in your own system, anything
-   that can run a program. Built for 0.2.0; in 0.1.0 you type or pipe the key through `ssh` yourself.
+   that can run a program. Since 0.2.0; without one you type or pipe the key through `ssh` yourself.
 5. **The door closes before the system starts.** The tailnet node goes offline, the door's keys are
    deleted from early boot's temporary storage, and your system's own Tailscale node comes up as
    usual. Built.
@@ -350,7 +349,7 @@ host key, so you can still unlock it over the network.
   default in the default profile, and is planned to be off by default in the `measured` profile
   (below).
 
-## What 0.1.0 includes, and what comes later
+## What 0.2.0 includes, and what comes later
 
 Each item says whether it exists in the repository today.
 
@@ -363,7 +362,7 @@ Each item says whether it exists in the repository today.
 - The Debian package, with the trigger that rebuilds images when Tailscale changes and the guard that
   refuses removal while the box depends on it: built, one `.deb` on each release.
 - A keyholder: `unlock` for you at a terminal, `deliver` for automation, `watch` to notice a box
-  waiting at its door after a reboot nobody planned: built, for 0.2.0. Plain `ssh` does the same job
+  waiting at its door after a reboot nobody planned: built. Plain `ssh` does the same job
   by hand.
 - A small, documented approver contract (JSON in, JSON out): built, with one approver for a terminal
   and an example to adapt. The complete approver that needs nothing but SSH is still to come.
@@ -373,7 +372,7 @@ Each item says whether it exists in the repository today.
 - Fallbacks: the box's own address when the tailnet is down, the recovery door after a TPM clear
   where you enabled it and can reach it, and the console. For a box behind NAT whose TPM failed, the
   console is the only way back. The uplink door, the recovery door and the console prompt are built.
-- A single-file keyholder for machines that are not Debian: built, for 0.2.0.
+- A single-file keyholder for machines that are not Debian: built.
 
 The container tests and a real boot under QEMU TCG run on every release. The virtual-machine scenarios
 that boot a real ZFS root pass in CI (since 2026-11-22). Nothing has yet run on real hardware.
@@ -474,7 +473,7 @@ your hands.
 **I set this up and the box did not unlock.** That is why you keep the old key file until a
 reboot has been unlocked through the door. The planned rehearsal makes the box wait a few minutes for
 a delivery and then boot with its old local key; the waiting-then-fall-back step is in the boot scripts
-already, but 0.1.0 has no command that turns it on, so use the console prompt and the key you kept.
+already, but 0.2.0 has no command that turns it on, so use the console prompt and the key you kept.
 
 ## How it compares
 
@@ -489,7 +488,7 @@ the key never lives on the machine and every unlock is a decision.
 
 ## Roadmap
 
-After 0.1.0 the order is: delivery and approvals (the keyholder, built for 0.2.0), then the rehearsal, `commit` and the other lifecycle commands, then dracut for Debian 14, the `measured`
+Delivery and approvals came in 0.2.0. Next are the rehearsal, `commit` and the other lifecycle commands, then dracut for Debian 14, the `measured`
 profile, and LUKS. The design, the test plan and the table of what is built are in
 [DESIGN.md](DESIGN.md), and every release's changes are in [CHANGELOG.md](CHANGELOG.md).
 
