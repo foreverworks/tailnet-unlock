@@ -1,5 +1,5 @@
-"""The tailnet tier of the VM scenarios (DESIGN.md 15.3: T1, T4, T5, T6, T7, T8, T15, T19, T20, T26)
-on a host with KVM, QEMU, OVMF, swtpm and openssl.
+"""The tailnet tier of the VM scenarios (DESIGN.md 15.3: T1 to T8, T12, T13, T15, T19, T20, T24 to
+T26) on a host with KVM, QEMU, OVMF, swtpm and openssl.
 
 `make vm-tailnet-test` runs them. headscale runs on the host as a process (tailnet.py, pinned in
 pins.env) with the example policy; the keyholder is a userspace tailscaled on the host. The guest
@@ -8,14 +8,19 @@ is the `tailnet` variant (guests.py): its first boot enrolled the unlock node th
 overlay of that disk with a copy of its TPM, reaches the door over the tailnet through the
 keyholder, and reads what headscale says about the node.
 
+The delivery scenarios run the keyholder's own commands on the host, from this checkout, with that
+keyholder's `tailscale` for the status and for ssh's ProxyCommand.
+
 What headscale cannot test: Tailnet Lock (T19's signed enrolment) is Tailscale's own feature. That
 half runs in the release matrix against a Tailscale tailnet; here T19 checks the other half, that
 the unlock node is reachable at every boot with its state in tmpfs only.
 """
 
 import json
+import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -42,6 +47,7 @@ from guests import (
     wait_for_door,
 )
 from harness import Vm, expect, ssh_argv, stop
+from shellenv import REPO
 from tailnet import Headscale, Node, Tools
 
 pytestmark = VM_MARKS
@@ -426,3 +432,271 @@ def test_t20_the_example_policy_isolates_the_door(
             tailnet.stop_node(node)
         for listener in listeners:
             listener.close()
+
+
+# --- delivery -----------------------------------------------------------------------------------
+
+APPROVER = r"""#!/usr/bin/env python3
+import json, os, sys, time
+here = os.path.dirname(os.path.abspath(sys.argv[0]))
+mode = sys.argv[1]
+request = json.load(sys.stdin)
+with open(here + "/requests.jsonl", "a") as log:
+    log.write(json.dumps(request) + "\n")
+answer = {"schema": "tailnet-unlock.approval-response/1", "request_id": request["request_id"],
+          "decision": "refuse" if mode == "refuse" else "approve", "by": "alice"}
+if mode == "acknowledge":
+    answer["recovery_acknowledged"] = True
+if mode == "hang":
+    time.sleep(300)
+saved = here + "/approval.json"
+if mode == "replay":
+    answer = json.load(open(saved))
+else:
+    json.dump(answer, open(saved, "w"))
+print(json.dumps(answer))
+"""
+
+
+def seen_online(node: Node, ip: str, timeout: float = 120) -> str:
+    """Wait until `node` sees the peer at `ip` online; returns the peer's stable id. An id, because
+    the image may have been built, and its node enrolled, more than once against one headscale."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        peers = tailnet.node_status(node).get("Peer") or {}
+        assert isinstance(peers, dict)
+        for peer in peers.values():
+            assert isinstance(peer, dict)
+            addresses = peer.get("TailscaleIPs")
+            if isinstance(addresses, list) and ip in addresses and peer.get("Online") is True:
+                return str(peer["ID"])
+        time.sleep(1)
+    raise AssertionError(f"{node.name} never saw {ip} online")
+
+
+@dataclass(frozen=True)
+class Delivery:
+    """A keyholder's configuration and state for one scenario."""
+
+    net: Net
+    work: Path
+    tguest: TailnetGuest
+    door_port: int
+    unlock_id: str
+
+
+def keyholder_of(net: Net, tguest: TailnetGuest, booted: Booted) -> Delivery:
+    """The unlock node may be offline (a recovery boot), so its id comes from headscale's list,
+    which the stable id a peer shows is made from."""
+    node = tailnet.node_by_ip(net.hs, unlock_ip(tguest))
+    assert node is not None
+    return Delivery(net, booted.work / "keyholder", tguest, booted.door_port, str(node["id"]))
+
+
+def configure(delivery: Delivery, mode: str, defaults: str = "") -> None:
+    net, work, tguest = delivery.net, delivery.work, delivery.tguest
+    work.mkdir(exist_ok=True)
+    approver = work / "approver"
+    approver.write_text(APPROVER)
+    approver.chmod(0o755)
+    (work / "root-key").write_text(PASSPHRASE + "\n")
+    (work / "keyholder.toml").write_text(f"""
+[defaults]
+tailscale = ["{net.tools.tailscale}", "--socket={net.keyholder.sock}"]
+ssh_proxy_command = "{tailnet.proxy_command(net.tools, net.keyholder.sock)}"
+ssh_key = "{tguest.keys / "keyholder"}"
+approver = ["{approver}", "{mode}"]
+approval_timeout_seconds = 60
+door_wait_minutes = 1
+node_wait_seconds = 0
+{defaults}
+
+[hosts.tu-test]
+key_command = ["cat", "{work / "root-key"}"]
+
+[hosts.tu-test.door]
+port = {tailnet.DOOR_PORT}
+door_key = "{tguest.door_pin}"
+recovery_key = "{tguest.recovery_pin}"
+unlock_node_id = "{delivery.unlock_id}"
+uplink = "127.0.0.1"
+uplink_port = {delivery.door_port}
+""")
+
+
+def keyholder(delivery: Delivery, command: str, *args: str) -> tuple[int, list[dict[str, object]]]:
+    """Run a keyholder command; its exit code and its JSON lines. T14: the key is in neither its
+    output nor its state."""
+    work = delivery.work
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tailnet_unlock",
+            command,
+            *args,
+            f"--config={work / 'keyholder.toml'}",
+            f"--state-dir={work / 'state'}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+        env={**os.environ, "PYTHONPATH": str(REPO / "src")},
+        stdin=subprocess.DEVNULL,
+    )
+    assert PASSPHRASE not in done.stdout + done.stderr
+    for path in (work / "state").rglob("*"):
+        assert not path.is_file() or PASSPHRASE.encode() not in path.read_bytes(), path
+    lines: list[dict[str, object]] = []
+    for line in done.stdout.splitlines():
+        parsed: object = json.loads(line)
+        assert isinstance(parsed, dict)
+        lines.append({str(key): value for key, value in parsed.items()})
+    print(done.stderr, file=sys.stderr)
+    return done.returncode, lines
+
+
+def deliver(delivery: Delivery) -> tuple[int, dict[str, object]]:
+    code, lines = keyholder(delivery, "deliver", "tu-test", "--reason=unplanned")
+    assert len(lines) == 1, lines
+    return code, lines[0]
+
+
+def requests(delivery: Delivery) -> list[dict[str, object]]:
+    path = delivery.work / "requests.jsonl"
+    lines = path.read_text().splitlines() if path.exists() else []
+    return [dict(json.loads(line)) for line in lines]
+
+
+def test_t2_the_watcher_finds_the_box_and_the_approver_approves(
+    net: Net, tguest: TailnetGuest, boot: Boot
+) -> None:
+    booted = boot("same", False)
+    _, boot_id = wait_for_door(tguest, booted, "sealed")
+    wait_tailnet_door(net, tguest, booted)
+    seen_online(net.keyholder, unlock_ip(tguest))
+    delivery = keyholder_of(net, tguest, booted)
+    configure(delivery, "approve")
+    code, lines = keyholder(delivery, "watch")
+    assert code == 0
+    event, audit = lines
+    assert (event["kind"], event["unlock_node"]) == ("waiting", "online")
+    assert (audit["result"], audit["boot_id"]) == ("delivered", boot_id)
+    assert audit["decision"] == {"approved": True, "by": "alice", "note": None}
+    door_line = audit["door"]
+    assert isinstance(door_line, dict)
+    assert (door_line["kind"], door_line["role"]) == ("tailnet", "sealed")
+    assert isinstance(audit["network"], dict)
+    assert audit["network"]["path"] in {"direct", "relayed"}
+    assert boot_record(booted)["unlocked_by"] == "sealed"
+
+
+def test_t3_a_refusal_and_a_timeout_send_nothing(
+    net: Net, tguest: TailnetGuest, boot: Boot
+) -> None:
+    booted = boot("same", False)
+    _, boot_id = wait_for_door(tguest, booted, "sealed")
+    delivery = keyholder_of(net, tguest, booted)
+    configure(delivery, "refuse")
+    code, audit = deliver(delivery)
+    assert (code, audit["result"]) == (3, "refused")
+    configure(delivery, "hang")
+    config = delivery.work / "keyholder.toml"
+    config.write_text(config.read_text().replace("timeout_seconds = 60", "timeout_seconds = 3"))
+    code, audit = deliver(delivery)
+    assert (code, audit["result"]) == (4, "approval-timeout")
+    status = json.loads(door(tguest, booted, "sealed", "status").stdout)
+    assert (status["boot_id"], status["waiting_for"]) == (boot_id, "rpool")
+    configure(delivery, "approve")
+    code, audit = deliver(delivery)
+    assert (code, audit["result"]) == (0, "delivered")
+    assert boot_record(booted)["unlocked_by"] == "sealed"
+
+
+def test_t12_an_approval_of_one_boot_is_refused_on_the_next(
+    net: Net, tguest: TailnetGuest, boot: Boot
+) -> None:
+    booted = boot("same", False)
+    _, first = wait_for_door(tguest, booted, "sealed")
+    delivery = keyholder_of(net, tguest, booted)
+    configure(delivery, "approve")
+    code, audit = deliver(delivery)
+    assert (code, audit["boot_id"]) == (0, first)
+    boot_record(booted)
+    mark = len(booted.vm.console.text)
+    guest_ssh(tguest, booted, "systemctl reboot")
+    _, second = wait_for_door(tguest, booted, "sealed", mark)
+    assert second != first
+    configure(delivery, "replay")
+    code, audit = deliver(delivery)
+    assert (code, audit["result"], audit["boot_id"]) == (3, "refused", second)
+    # and the door itself takes no key for another boot
+    refused = door(tguest, booted, "sealed", f"unlock {first}", PASSPHRASE.encode())
+    assert json.loads(refused.stdout)["result"] == "boot-mismatch"
+    configure(delivery, "approve")
+    assert deliver(delivery)[0] == 0
+    assert boot_record(booted, mark)["unlocked_by"] == "sealed"
+
+
+@pytest.mark.parametrize("tpm", ["reset", "fresh"])
+def test_t24_t25_a_recovery_delivery(net: Net, tguest: TailnetGuest, boot: Boot, tpm: str) -> None:
+    """A cleared TPM (T24) and a copy on another TPM (T25). A door changed to report another key
+    than it presents is in tests/delivery."""
+    booted = boot(tpm, False)
+    wait_for_door(tguest, booted, "recovery")
+    delivery = keyholder_of(net, tguest, booted)
+    configure(delivery, "acknowledge")
+    code, audit = deliver(delivery)
+    assert (code, audit["result"]) == (8, "recovery-only")
+    assert requests(delivery) == [], "the approver was asked"
+    allow = "allow_recovery_delivery = true"
+    configure(delivery, "approve", allow)
+    code, audit = deliver(delivery)
+    assert (code, audit["result"]) == (3, "refused")
+    configure(delivery, "acknowledge", allow)
+    code, audit = deliver(delivery)
+    assert (code, audit["result"]) == (0, "delivered")
+    for request in requests(delivery):
+        asked = request["door"]
+        assert isinstance(asked, dict)
+        assert (asked["role"], asked["kind"]) == ("recovery", "uplink")
+    assert boot_record(booted)["unlocked_by"] == "recovery"
+
+
+def test_t13_an_unlock_node_online_while_the_box_runs(
+    net: Net, tguest: TailnetGuest, tmp_path: Path
+) -> None:
+    """Two stand-in nodes, no guest: the box's own and its unlock node, both online. Both carry the
+    door's tag, because the example policy shows the keyholder nothing else."""
+    own = tailnet.start_node(net.tools, net.hs, tmp_path / "own", "t13-box", "tag:unlock")
+    unlock = tailnet.start_node(
+        net.tools, net.hs, tmp_path / "unlock", "t13-box-unlock", "tag:unlock"
+    )
+    told = tmp_path / "told"
+    hook = tmp_path / "alarm"
+    hook.write_text(f"#!/bin/sh\ncat >>'{told}'\n")
+    hook.chmod(0o755)
+    delivery = Delivery(net, tmp_path, tguest, 0, "")
+    (tmp_path / "keyholder.toml").write_text(f"""
+[defaults]
+tailscale = ["{net.tools.tailscale}", "--socket={net.keyholder.sock}"]
+on_waiting = ["true"]
+alarm = ["{hook}"]
+alarm_after_seconds = 3
+[hosts.t13-box]
+node_id = "{seen_online(net.keyholder, tailnet.node_ip(own))}"
+[hosts.t13-box.door]
+door_key = "{tguest.door_pin}"
+unlock_node_id = "{seen_online(net.keyholder, tailnet.node_ip(unlock))}"
+""")
+    try:
+        for _ in range(2):
+            code, lines = keyholder(delivery, "watch")
+            assert code == 0
+        assert lines == [], "told twice in one episode"
+        events = [json.loads(line) for line in told.read_text().splitlines()]
+        assert [event["kind"] for event in events] == ["alarm"]
+    finally:
+        tailnet.stop_node(own)
+        tailnet.stop_node(unlock)
