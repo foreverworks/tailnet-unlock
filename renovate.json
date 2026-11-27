@@ -1,7 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "local>foreverworks/renovate-config"
+    "github>foreverworks/renovate-config"
   ],
   "ignorePaths": [
     "**/node_modules/**"
@@ -69,9 +69,8 @@
   ],
   "packageRules": [
     {
-      "description": "A new Action or Python tool waits three days before its pull request: both run in CI, and a bad release is usually withdrawn within that time.",
+      "description": "A new Python tool, or a headscale or Tailscale release for the VM suite, waits three days before its pull request: both run in CI, and a bad release is usually withdrawn within that time. The shared preset already holds back GitHub Actions and npm packages the same way.",
       "matchDatasources": [
-        "github-tags",
         "github-releases",
         "pypi"
       ],
